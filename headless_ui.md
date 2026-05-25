@@ -858,17 +858,43 @@ python -m fleet_ui --gateway localhost:50050
 - [x] Unit tests: control command error paths (28 tests, `test_sidecar.py`)
 - **Total: 73/73 tests passing**
 
-### Phase 2: Gateway & Auth (Week 3-4)
-- [ ] Implement FleetGatewayService RPCs
-- [ ] OIDC token validation (support Keycloak/Auth0 format)
-- [ ] RBAC policy engine with attribute-based scoping
-- [ ] Machine registration and heartbeat mechanism
-- [ ] Broadcast command fan-out
-- [ ] TLS/mTLS certificate management
-- [ ] Unit tests: OIDC token parsing and expiration checks
-- [ ] Unit tests: RBAC policy evaluation (role + facility + tags filtering)
-- [ ] Unit tests: machine registry CRUD and TTL expiry
-- [ ] Unit tests: broadcast fan-out with per-result tracking
+### Phase 2: Gateway & Auth (Week 3-4) ✅ COMPLETE
+- [x] Implement FleetGatewayService RPCs (`gateway/server.py`)
+  - [x] DiscoverMachines — facility filtering + RBAC
+  - [x] RouteMachine — address:port lookup with auth
+  - [x] BroadcastCommand — fan-out with per-machine auth + result aggregation
+  - [x] SubscribeAllStatus — interleaved streaming from multiple machines
+- [x] OIDC token validation (support Keycloak/Auth0 format) (`gateway/auth.py`)
+  - [x] HS256 symmetric signing
+  - [x] RS256/RS384/RS512 asymmetric via JWKS cache
+  - [x] Expiration, issuer, audience validation
+- [x] RBAC policy engine with attribute-based scoping (`gateway/policies.py`)
+  - [x] Role hierarchy: viewer < operator < programmer < maintainer < admin
+  - [x] 13 permissions mapped to role sets
+  - [x] Facility/tag scope filtering
+  - [x] Broadcast authorization per command type
+- [x] Machine registration and heartbeat mechanism (`gateway/registry.py`)
+  - [x] TTL-based expiry with background cleanup thread
+  - [x] CRUD operations (register, heartbeat, unregister, lookup, list_all)
+  - [x] Scope resolution (ALL/FACILITY/TAG)
+- [x] Broadcast command fan-out — per-machine auth checks + result aggregation
+- [ ] TLS/mTLS certificate management (deferred)
+- [x] Gateway CLI entry point (`gateway/cli.py`)
+  - [x] `fleet-gateway` with --port, --cert, --key, --root-cert, --jwt-secret, --jwks-url, --issuer, --audience
+  - [x] Argument validation (TLS pairs, JWT mutual exclusivity)
+- [x] mTLS interceptor for FleetService (`linuxcnc_fleet/auth.py`)
+  - [x] AuthContext extraction from OIDC tokens via gRPC metadata
+  - [x] Role-hierarchy checks on control/write RPCs (operator+ / programmer+)
+  - [x] Callable-based user_extractor (decoupled from specific AuthManager)
+- [x] Server auth wiring (`linuxcnc_fleet/server.py`) — FleetServiceRPC integrates interceptor
+- [x] CLI auth wiring (`linuxcnc_fleet/cli.py`) — --jwt-secret/--jwks-url args, creates user_extractor
+- [x] Unit tests: OIDC token parsing and expiration checks (32 tests, `test_auth.py`)
+- [x] Unit tests: RBAC policy evaluation — role + facility + tags filtering (50 tests, `test_policies.py`)
+- [x] Unit tests: machine registry CRUD and TTL expiry (41 tests, `test_registry.py`)
+- [x] Unit tests: broadcast fan-out with per-result tracking (35 tests, `test_gateway.py`)
+- [x] Unit tests: gateway CLI parsing and TLS validation (20 tests, `test_gateway_cli.py`)
+- [x] Unit tests: OIDC interceptor behavior (18 tests, `test_interceptor.py`)
+- **Total: 281/281 tests passing**
 
 ### Phase 3: Client Library & UI Integration (Week 5-6)
 - [ ] Implement `FleetClient` high-level library
