@@ -6,7 +6,7 @@ import asyncio
 import logging
 import threading
 from concurrent import futures
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Generator, Optional
 
 import grpc
 
@@ -65,7 +65,7 @@ class FleetServiceRPC(FleetServiceServicer):
     def GetStatus(self, request: MachineId, context: grpc.ServicerContext) -> MachineStatus:
         return self.sidecar.get_status()
 
-    def SubscribeStatus(
+    async def SubscribeStatus(
         self, request: MachineId, context: grpc.ServicerContext
     ) -> AsyncGenerator[MachineStatus, None]:
         while True:
@@ -148,7 +148,7 @@ class FleetServiceRPC(FleetServiceServicer):
 
     def SubscribeHalPins(
         self, request: HalPinSubscribe, context: grpc.ServicerContext
-    ) -> AsyncGenerator[HalPinUpdate, None]:
+    ) -> Generator[HalPinUpdate, None, None]:
         updates = self.sidecar.subscribe_hal_pins(request.pin_names, request.poll_interval_seconds)
         for update in updates:
             if not self.sidecar._running:
@@ -163,7 +163,7 @@ class FleetServiceRPC(FleetServiceServicer):
 
     def SubscribeErrors(
         self, request: MachineId, context: grpc.ServicerContext
-    ) -> AsyncGenerator[ErrorEvent, None]:
+    ) -> Generator[ErrorEvent, None, None]:
         events = self.sidecar.subscribe_errors()
         for event in events:
             if not self.sidecar._running:
@@ -207,7 +207,7 @@ class GatewayServiceRPC(FleetGatewayServiceServicer):
 
     def SubscribeAllStatus(
         self, request: SubscribeAllRequest, context: grpc.ServicerContext
-    ) -> AsyncGenerator[MachineStatus, None]:
+    ) -> Generator[MachineStatus, None, None]:
         context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         yield MachineStatus()
 
