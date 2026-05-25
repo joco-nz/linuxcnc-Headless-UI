@@ -25,6 +25,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     HalPinType,
     HalPinUpdate,
     HalPinValue,
+    HomeAxisRequest,
     IniParamRequest,
     IniParamValue,
     ListHalRequest,
@@ -159,10 +160,10 @@ class FleetServiceRPC(FleetServiceServicer):
             return Result(success=False, message="Access denied")
         return self.sidecar.home_all()
 
-    def HomeAxis(self, request: TrajAxis, context: grpc.ServicerContext) -> Result:
+    def HomeAxis(self, request: HomeAxisRequest, context: grpc.ServicerContext) -> Result:
         if not self._check_control_access(context, "HomeAxis"):
             return Result(success=False, message="Access denied")
-        return self.sidecar.home_axis(request)
+        return self.sidecar.home_axis(request.axis)
 
     # -- G-code / MDI --
 

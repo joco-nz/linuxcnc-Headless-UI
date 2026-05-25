@@ -852,10 +852,10 @@ python -m fleet_ui --gateway localhost:50050
 - [x] CLI entry point with TLS/mTLS validation (`linuxcnc_fleet/cli.py`)
 - [ ] Write systemd service template (deferred)
 - [ ] Test against a single LinuxCNC instance (uspace mode) — requires target machine
-- [x] Unit tests: state mapping correctness (20 tests, `test_state_mapping.py`)
+- [x] Unit tests: state mapping correctness (26 tests, `test_state_mapping.py`)
 - [x] Unit tests: snapshot immutability and atomic swap behavior (7 tests, `test_snapshot.py`)
 - [x] Unit tests: CLI argument parsing and TLS validation (18 tests, `test_cli.py`)
-- [x] Unit tests: control command error paths (28 tests, `test_sidecar.py`)
+- [x] Unit tests: control command error paths (22 tests, `test_sidecar.py`)
 - **Total: 73/73 tests passing**
 
 ### Phase 2: Gateway & Auth (Week 3-4) ✅ COMPLETE
@@ -888,23 +888,31 @@ python -m fleet_ui --gateway localhost:50050
   - [x] Callable-based user_extractor (decoupled from specific AuthManager)
 - [x] Server auth wiring (`linuxcnc_fleet/server.py`) — FleetServiceRPC integrates interceptor
 - [x] CLI auth wiring (`linuxcnc_fleet/cli.py`) — --jwt-secret/--jwks-url args, creates user_extractor
-- [x] Unit tests: OIDC token parsing and expiration checks (32 tests, `test_auth.py`)
-- [x] Unit tests: RBAC policy evaluation — role + facility + tags filtering (50 tests, `test_policies.py`)
+- [x] Unit tests: OIDC token parsing and expiration checks (31 tests, `test_auth.py`)
+- [x] Unit tests: RBAC policy evaluation — role + facility + tags filtering (62 tests, `test_policies.py`)
 - [x] Unit tests: machine registry CRUD and TTL expiry (41 tests, `test_registry.py`)
 - [x] Unit tests: broadcast fan-out with per-result tracking (35 tests, `test_gateway.py`)
 - [x] Unit tests: gateway CLI parsing and TLS validation (20 tests, `test_gateway_cli.py`)
-- [x] Unit tests: OIDC interceptor behavior (18 tests, `test_interceptor.py`)
-- **Total: 281/281 tests passing**
+- [x] Unit tests: OIDC interceptor behavior (19 tests, `test_interceptor.py`)
+- **Total: 208/208 tests passing**
 
 ### Phase 3: Client Library & UI Integration (Week 5-6)
-- [ ] Implement `FleetClient` high-level library
-- [ ] Generated gRPC stubs for all services
-- [ ] Channel caching and connection management
-- [ ] Streaming status subscription support
-- [ ] Error handling and retry logic
-- [ ] Unit tests: FleetClient routing and channel caching
-- [ ] Unit tests: streaming subscription lifecycle (start/stop)
-- [ ] Unit tests: error handling and retry backoff behavior
+- [x] Implement `FleetClient` high-level library (`fleet_client/client.py`, ~1000 lines)
+- [x] OIDC auth interceptor (`fleet_client/auth.py`, ~60 lines)
+- [x] Generated gRPC stubs for all services (regenerated with HomeAxis, SendMdiCommand, LoadProgram RPCs)
+- [x] Channel caching with TTL expiry (default 300s) and thread-safe cleanup
+- [x] Streaming status subscription support (async generators)
+- [x] Error handling and retry logic (exponential backoff, 3 retries max for read-only RPCs)
+- [x] FleetClient wrappers: home_axis(), load_program() (proto + stubs regenerated)
+- [x] FleetClient wrapper: send_mdi() updated to use SendMdiCommand RPC (was using SetExecution)
+- [x] Unit tests: FleetClient routing and channel caching (6 tests, `test_fleet_client.py`)
+- [x] Unit tests: streaming subscription lifecycle (start/stop) (4 tests, `test_fleet_client.py`)
+- [x] Unit tests: error handling and retry backoff behavior (3 tests, `test_fleet_client.py`)
+- [x] Unit tests: gateway RPC wrappers (4 tests, `test_fleet_client.py`)
+- [x] Unit tests: fleet service wrappers (17 tests, `test_fleet_client.py` — includes home_axis, load_program)
+- [x] Unit tests: TLS channel creation (2 tests, `test_fleet_client.py`)
+- [x] Unit tests: async context manager (2 tests, `test_fleet_client.py`)
+- **Total: 327/327 tests passing**
 
 ### Phase 4: Hardening & Packaging (Week 7-8)
 - [ ] Central UI integration tests against gateway + sidecar

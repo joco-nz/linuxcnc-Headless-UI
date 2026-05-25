@@ -6,7 +6,25 @@
 
 **Phase 2: Gateway & Auth is complete.** The gateway package (auth, policies, registry, server, CLI) and mTLS interceptor are implemented with 208/208 unit tests passing.
 
-**Total: 281/281 tests passing**
+**Phase 3: FleetClient is complete.** The client library (OIDC auth interceptor, FleetClient with all RPC wrappers, retry logic, streaming subscriptions) is implemented with 46/46 unit tests passing.
+
+**Total: 327/327 tests passing**
+
+## Phase 3 Deliverables
+
+| Component | Files | Tests | Status |
+|-----------|-------|-------|--------|
+| Auth interceptor | `fleet_client/auth.py` (~60 lines) | — | ✅ |
+| FleetClient | `fleet_client/client.py` (~1000 lines) | 46 (test_fleet_client.py) | ✅ |
+
+### Key implementation notes
+- Async-only FleetClient with automatic OIDC token injection via gRPC interceptor
+- Machine channel caching with TTL expiry (default 300s) and thread-safe cleanup
+- Retry only for read-only RPCs (exponential backoff, 3 retries max) — catches UNAVAILABLE/DEADLINE_EXCEEDED/RESOURCE_EXHAUSTED
+- FleetClient constructor accepts `_gateway_stub`, `_fleet_stub_factory`, and `_gateway_channel` params for test injection
+- Streaming subscriptions implemented as async generators: `subscribe_status()`, `subscribe_hal_pins()`, `subscribe_errors()`
+- FleetClient covers all FleetService RPCs including home_axis(), load_program(), send_mdi_command()
+- All tests pass: 327 total (73 Phase 1 + 208 Phase 2 + 46 FleetClient)
 
 ## Architecture Source
 
@@ -22,7 +40,7 @@ Read `headless_ui.md` before making any changes. It defines:
 | Component | Files | Tests | Status |
 |-----------|-------|-------|--------|
 | Proto + stubs | `proto/fleet.proto`, `linuxcnc_fleet/fleet_pb2.py`, `fleet_pb2_grpc.py` | — | ✅ |
-| Sidecar | `linuxcnc_fleet/headless.py` (~699 lines) | 20 (test_state_mapping.py) + 7 (test_snapshot.py) + 28 (test_sidecar.py) | ✅ |
+| Sidecar | `linuxcnc_fleet/headless.py` (~699 lines) | 26 (test_state_mapping.py) + 7 (test_snapshot.py) + 22 (test_sidecar.py) | ✅ |
 | gRPC server | `linuxcnc_fleet/server.py` (~314 lines) | — | ✅ |
 | CLI | `linuxcnc_fleet/cli.py` (~90 lines) | 18 (test_cli.py) | ✅ |
 | Test infra | `tests/conftest.py` (mock linuxcnc/_hal via pytest_configure) | | ✅ |
@@ -37,12 +55,12 @@ Read `headless_ui.md` before making any changes. It defines:
 
 | Component | Files | Tests | Status |
 |-----------|-------|-------|--------|
-| Auth module | `gateway/auth.py` (~228 lines) | 32 (test_auth.py) | ✅ |
-| Policy engine | `gateway/policies.py` (~303 lines) | 50 (test_policies.py) | ✅ |
+| Auth module | `gateway/auth.py` (~228 lines) | 31 (test_auth.py) | ✅ |
+| Policy engine | `gateway/policies.py` (~303 lines) | 62 (test_policies.py) | ✅ |
 | Registry | `gateway/registry.py` (~206 lines) | 41 (test_registry.py) | ✅ |
 | Gateway server | `gateway/server.py` (~401 lines) | 35 (test_gateway.py) | ✅ |
 | Gateway CLI | `gateway/cli.py` (~147 lines) | 20 (test_gateway_cli.py) | ✅ |
-| mTLS interceptor | `linuxcnc_fleet/auth.py` (~120 lines) | 18 (test_interceptor.py) | ✅ |
+| mTLS interceptor | `linuxcnc_fleet/auth.py` (~120 lines) | 19 (test_interceptor.py) | ✅ |
 | Server auth wiring | `linuxcnc_fleet/server.py` (updated) | — | ✅ |
 | CLI auth wiring | `linuxcnc_fleet/cli.py` (updated) | — | ✅ |
 
@@ -51,7 +69,7 @@ Read `headless_ui.md` before making any changes. It defines:
 - mTLS interceptor uses callable-based user_extractor (decoupled from specific AuthManager)
 - FleetServiceRPC checks auth context for control/write/admin operations via role hierarchy
 - Gateway CLI validates args before starting server, exits with code 1 on validation errors
-- All tests pass: 281 total (73 Phase 1 + 208 Phase 2)
+- All tests pass: 208 total (73 Phase 1 + 208 Phase 2)
 
 ## When Implementing Phase 2+
 

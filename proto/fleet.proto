@@ -314,6 +314,11 @@ message BroadcastResult {
   map<string, Result> results = 1;
 }
 
+message HomeAxisRequest {
+  MachineId id = 1;
+  TrajAxis axis = 2;
+}
+
 // Services
 
 service FleetService {
@@ -326,6 +331,9 @@ service FleetService {
   rpc FeedHold(Empty) returns (Result);
   rpc Continue(Empty) returns (Result);
   rpc HomeAll(Empty) returns (Result);
+  rpc HomeAxis(HomeAxisRequest) returns (Result);
+  rpc SendMdiCommand(MdiCommand) returns (Result);
+  rpc LoadProgram(ProgramPath) returns (Result);
   rpc StepForward(Empty) returns (Result);
   rpc GetPosition(PositionRequest) returns (PositionResponse);
   rpc ListHalComponents(ListHalRequest) returns (HalComponentList);
