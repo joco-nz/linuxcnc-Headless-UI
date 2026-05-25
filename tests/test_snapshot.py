@@ -3,6 +3,7 @@
 import dataclasses
 import threading
 import time
+import types
 
 import pytest
 
@@ -65,25 +66,25 @@ class TestSnapshotReplace:
 
 class TestAtomicSwap:
     def test_writer_reader_no_lock_swap(self):
-        """Writer thread replaces snapshot; reader sees either old or new — never partial."""
-        target_snap = _Snapshot(machine_id="test")
+        """Writer thread replaces snapshot on an object; reader sees either old or new — never partial."""
+        # Create a container object that holds the snapshot (like LinuxCncSidecar does)
+        container = types.SimpleNamespace()
+        container._snapshot = _Snapshot(machine_id="initial")
 
-        # Simulate the pattern used in LinuxCncSidecar:
-        # writer does object.__setattr__(self, '_snapshot', new_snapshot)
-        # reader reads self._snapshot
+        ready = threading.Event()
+
         def writer():
             for i in range(100):
                 new_snap = _Snapshot(machine_id=f"machine-{i}", state=i)
-                object.__setattr__(target_snap, '__test_snapshot__', new_snap)
+                object.__setattr__(container, '_snapshot', new_snap)
                 time.sleep(0.001)
 
         collected = []
-        barrier = threading.Barrier(2)
 
         def reader():
-            barrier.wait()  # synchronize start
+            ready.wait()  # wait for writer to start
             for _ in range(200):
-                snap = getattr(target_snap, '__test_snapshot__', None)
+                snap = container._snapshot
                 if snap is not None:
                     collected.append(snap.machine_id)
                 time.sleep(0.001)
@@ -91,14 +92,16 @@ class TestAtomicSwap:
         t_writer = threading.Thread(target=writer)
         t_reader = threading.Thread(target=reader)
         t_writer.start()
+        ready.set()  # signal reader to start
         t_reader.start()
         t_writer.join(timeout=5)
         t_reader.join(timeout=5)
 
         # Every collected snapshot should have a valid machine_id (never partial/corrupt)
         for mid in collected:
-            assert mid.startswith("machine-")
-            assert mid.split("-")[1].isdigit()
+            assert mid.startswith("machine-") or mid == "initial"
+            if mid != "initial":
+                assert mid.split("-")[1].isdigit()
 
     def test_snapshot_errors_field_is_independent(self):
         """Each _Snapshot has its own errors list — no shared mutable state."""
