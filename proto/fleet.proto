@@ -1,0 +1,346 @@
+syntax = "proto3";
+
+package linuxcnc_fleet;
+
+// Enums
+
+enum MachineState {
+  UNKNOWN = 0;
+  OFF = 1;
+  INITIALIZING = 2;
+  RUNNING = 3;
+  PAUSED = 4;
+  HOLD = 5;
+  E_STOP = 6;
+  JOG = 7;
+  MANUAL = 8;
+  AUTO_DONE = 9;
+}
+
+enum ExecutionState {
+  EXEC_IDLE = 0;
+  RUN = 1;
+  FAST_RUN = 2;
+  STEP = 3;
+  RETRACT = 4;
+  MDA = 5;
+}
+
+enum InterpState {
+  INTERP_IDLE = 0;
+  READ = 1;
+  PREDICT = 2;
+  EXECUTE = 3;
+  ERROR = 4;
+}
+
+enum EstopState {
+  UNKNOWABLE = 0;
+  NOT_E_STOPPED = 1;
+  E_STOPPED = 2;
+}
+
+enum Mode {
+  MODE_UNKNOWN = 0;
+  MODE_MANUAL = 1;
+  MODE_AUTO = 2;
+  MODE_MDA = 3;
+}
+
+enum TrajAxis {
+  X_AXIS = 0;
+  Y_AXIS = 1;
+  Z_AXIS = 2;
+  A_AXIS = 3;
+  B_AXIS = 4;
+  C_AXIS = 5;
+  U_AXIS = 6;
+  V_AXIS = 7;
+  W_AXIS = 8;
+  P_AXIS = 9;
+  Q_AXIS = 10;
+}
+
+enum HalPinType {
+  PIN_TYPE_BIT = 0;
+  PIN_TYPE_U32 = 1;
+  PIN_TYPE_S32 = 2;
+  PIN_TYPE_FLOAT = 3;
+  PIN_TYPE_DIR = 4;
+}
+
+enum ErrorCode {
+  SUCCESS = 0;
+  MACHINE_OFF = 1;
+  E_STOP_ACTIVE = 2;
+  INCORRECT_MODE = 3;
+  BUSY = 4;
+  INVALID_STATE = 5;
+  HAL_PIN_NOT_FOUND = 6;
+  HAL_WRITE_PROTECTED = 7;
+  TIMEOUT = 8;
+  INTERNAL_ERROR = 9;
+}
+
+// Messages — Status
+
+message Empty {}
+
+message Position {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double a = 4;
+  double b = 5;
+  double c = 6;
+  double u = 7;
+  double v = 8;
+  double w = 9;
+  double p = 10;
+  double q = 11;
+}
+
+message MachineStatus {
+  string machine_id = 1;
+  MachineState state = 2;
+  ExecutionState execution = 3;
+  InterpState interp_state = 4;
+  EstopState estop_state = 5;
+  Mode mode = 6;
+  Position joint_actual = 7;
+  Position joint_commanded = 8;
+  Position world_actual = 9;
+  int32 interp_line = 10;
+  string program_file = 11;
+  string remaining_time = 12;
+  double feedrate = 13;
+  double feedrate_override = 14;
+  double spindle_speed = 15;
+  double spindle_speed_override = 16;
+  bool coolant_mist = 17;
+  bool coolant_flood = 18;
+  bool coolant_mazak = 19;
+  repeated string active_errors = 20;
+  double cycle_time = 21;
+  int32 motion_type = 22;
+}
+
+message HalPinInfo {
+  string name = 1;
+  HalPinType type = 2;
+  bool is_output = 3;
+  float value_f = 4;
+  uint32 value_u32 = 5;
+  int32 value_s32 = 6;
+  bool value_bit = 7;
+}
+
+message HalComponentInfo {
+  string name = 1;
+  double update_period_ns = 2;
+  repeated HalPinInfo pins = 3;
+  map<string, float> params = 4;
+}
+
+message LinuxCncVersion {
+  string version_string = 1;
+  string build_type = 2;
+  string git_hash = 3;
+}
+
+message MachineInfo {
+  string machine_id = 1;
+  string machine_name = 2;
+  string host_address = 3;
+  LinuxCncVersion version = 4;
+  int32 num_joints = 5;
+  int32 num_hal_components = 6;
+}
+
+// FleetService RPCs — per-instance
+
+message MachineId {
+  string id = 1;
+}
+
+message SetModeRequest {
+  MachineId id = 1;
+  Mode mode = 2;
+}
+
+message ExecutionCommand {
+  MachineId id = 1;
+  ExecutionState state = 2;
+}
+
+message MdiCommand {
+  MachineId id = 1;
+  string command = 2;
+}
+
+message ProgramPath {
+  MachineId id = 1;
+  string path = 2;
+}
+
+message PositionRequest {
+  MachineId id = 1;
+  enum Type {
+    WORLD = 0;
+    JOINT = 1;
+    DEVICE = 2;
+  }
+  Type type = 2;
+}
+
+message PositionResponse {
+  MachineId id = 1;
+  Position position = 2;
+}
+
+message ListHalRequest {
+  MachineId id = 1;
+}
+
+message HalComponentList {
+  repeated HalComponentInfo components = 1;
+}
+
+message HalPinRead {
+  MachineId id = 1;
+  string pin_name = 2;
+}
+
+message HalPinValue {
+  string pin_name = 1;
+  HalPinType type = 2;
+  float value_f = 3;
+  uint32 value_u32 = 4;
+  int32 value_s32 = 5;
+  bool value_bit = 6;
+}
+
+message HalPinWrite {
+  MachineId id = 1;
+  string pin_name = 2;
+  float value_f = 3;
+  uint32 value_u32 = 4;
+  int32 value_s32 = 5;
+  bool value_bit = 6;
+}
+
+message HalPinSubscribe {
+  MachineId id = 1;
+  repeated string pin_names = 2;
+  double poll_interval_seconds = 3;
+}
+
+message HalPinUpdate {
+  string pin_name = 1;
+  float value_f = 2;
+  uint32 value_u32 = 3;
+  int32 value_s32 = 4;
+  bool value_bit = 5;
+}
+
+message GetErrorsRequest {
+  MachineId id = 1;
+  int32 limit = 2;
+}
+
+message ErrorEvent {
+  string message = 1;
+  double timestamp = 2;
+}
+
+message ErrorList {
+  repeated ErrorEvent errors = 1;
+}
+
+message IniParamRequest {
+  MachineId id = 1;
+  string section = 2;
+  string option = 3;
+}
+
+message IniParamValue {
+  MachineId id = 1;
+  string value = 2;
+}
+
+message Result {
+  bool success = 1;
+  string message = 2;
+  ErrorCode error_code = 3;
+}
+
+// FleetGatewayService (central)
+
+message DiscoverRequest {
+  string facility = 1;
+}
+
+message MachineList {
+  repeated MachineInfo machines = 1;
+}
+
+message GatewayRoute {
+  string instance_address = 1;
+  int32 instance_port = 2;
+}
+
+message SubscribeAllRequest {
+  string facility = 1;
+  double poll_interval_seconds = 2;
+}
+
+message BroadcastRequest {
+  enum Scope {
+    ALL = 0;
+    FACILITY = 1;
+    TAG = 2;
+  }
+  Scope scope = 1;
+  string facility = 2;
+  repeated string tags = 3;
+  oneof command {
+    MdiCommand mdi = 4;
+    ExecutionCommand exec = 5;
+    SetModeRequest mode = 6;
+  }
+}
+
+message BroadcastResult {
+  map<string, Result> results = 1;
+}
+
+// Services
+
+service FleetService {
+  rpc GetStatus(MachineId) returns (MachineStatus);
+  rpc SubscribeStatus(MachineId) returns (stream MachineStatus);
+  rpc SetMode(SetModeRequest) returns (Result);
+  rpc SetExecution(ExecutionCommand) returns (Result);
+ rpc Start(Empty) returns (Result);
+  rpc Stop(Empty) returns (Result);
+  rpc FeedHold(Empty) returns (Result);
+  rpc Continue(Empty) returns (Result);
+  rpc HomeAll(Empty) returns (Result);
+  rpc StepForward(Empty) returns (Result);
+  rpc GetPosition(PositionRequest) returns (PositionResponse);
+  rpc ListHalComponents(ListHalRequest) returns (HalComponentList);
+  rpc ReadHalPin(HalPinRead) returns (HalPinValue);
+  rpc WriteHalPin(HalPinWrite) returns (Result);
+  rpc SubscribeHalPins(HalPinSubscribe) returns (stream HalPinUpdate);
+  rpc GetErrors(GetErrorsRequest) returns (ErrorList);
+  rpc SubscribeErrors(MachineId) returns (stream ErrorEvent);
+  rpc GetMachineInfo(MachineId) returns (MachineInfo);
+  rpc GetIniParam(IniParamRequest) returns (IniParamValue);
+}
+
+service FleetGatewayService {
+  rpc DiscoverMachines(DiscoverRequest) returns (MachineList);
+  rpc RouteMachine(MachineId) returns (GatewayRoute);
+  rpc BroadcastCommand(BroadcastRequest) returns (BroadcastResult);
+  rpc SubscribeAllStatus(SubscribeAllRequest) returns (stream MachineStatus);
+}
