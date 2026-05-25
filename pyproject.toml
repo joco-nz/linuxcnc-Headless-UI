@@ -34,6 +34,7 @@ dev = [
 
 [project.scripts]
 headless-server = "linuxcnc_fleet.cli:main"
+fleet-gateway = "gateway.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["linuxcnc_fleet*", "gateway*", "fleet_client*"]

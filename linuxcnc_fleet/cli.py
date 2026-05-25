@@ -59,6 +59,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Increase log verbosity (-v: INFO, -vv: DEBUG)",
     )
+    parser.add_argument(
+        "--jwt-secret",
+        default=None,
+        help="HS256 JWT signing secret for OIDC token validation.",
+    )
+    parser.add_argument(
+        "--jwks-url",
+        default=None,
+        help="JWKS endpoint URL for RS256/RS384/RS512 token validation.",
+    )
+    parser.add_argument(
+        "--issuer",
+        default=None,
+        help="Expected JWT issuer (iss) claim.",
+    )
+    parser.add_argument(
+        "--audience",
+        default=None,
+        help="Expected JWT audience (aud) claim.",
+    )
 
     return parser.parse_args(argv)
 
@@ -85,6 +105,26 @@ def main(argv: list[str] | None = None) -> None:
         logging.error("--root-cert requires both --cert and --key")
         sys.exit(1)
 
+    # Validate OIDC arguments
+    user_extractor = None
+    if args.jwt_secret or args.jwks_url:
+        if args.jwt_secret and args.jwks_url:
+            logging.error("--jwt-secret and --jwks-url are mutually exclusive")
+            sys.exit(1)
+        try:
+            from gateway.auth import AuthManager
+            auth_manager = AuthManager(
+                secret=args.jwt_secret,
+                jwks_url=args.jwks_url,
+                issuer=args.issuer,
+                audience=args.audience,
+            )
+            user_extractor = auth_manager.extract_user
+            logging.info("OIDC authentication enabled")
+        except Exception as e:
+            logging.error("Failed to initialize auth manager: %s", e)
+            sys.exit(1)
+
     # Create sidecar
     try:
         sidecar = LinuxCncSidecar(ini_path=args.ini, machine_id=args.machine_id)
@@ -100,6 +140,7 @@ def main(argv: list[str] | None = None) -> None:
         key_file=args.key,
         root_cert_file=args.root_cert,
         use_gateway=args.gateway,
+        user_extractor=user_extractor,
     )
 
 

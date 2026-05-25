@@ -2,7 +2,11 @@
 
 ## Current State
 
-**Phase 1: Core Sidecar is complete.** The sidecar component (proto, LinuxCncSidecar, gRPC server, CLI) is implemented with 73/73 unit tests passing. Next phase is Phase 2: Gateway & Auth.
+**Phase 1: Core Sidecar is complete.** The sidecar component (proto, LinuxCncSidecar, gRPC server, CLI) is implemented with 73/73 unit tests passing.
+
+**Phase 2: Gateway & Auth is complete.** The gateway package (auth, policies, registry, server, CLI) and mTLS interceptor are implemented with 208/208 unit tests passing.
+
+**Total: 281/281 tests passing**
 
 ## Architecture Source
 
@@ -28,6 +32,26 @@ Read `headless_ui.md` before making any changes. It defines:
 - State mapping functions use protobuf enum values directly (no `.value` — they are ints)
 - Proto uses `MODE_MDA`, not `MODE_MDI` (linuxcnc constant is `MODE_MDI`)
 - Mock linuxcnc/_hal modules injected via `pytest_configure` in conftest.py (before test collection)
+
+## Phase 2 Deliverables
+
+| Component | Files | Tests | Status |
+|-----------|-------|-------|--------|
+| Auth module | `gateway/auth.py` (~228 lines) | 32 (test_auth.py) | ✅ |
+| Policy engine | `gateway/policies.py` (~303 lines) | 50 (test_policies.py) | ✅ |
+| Registry | `gateway/registry.py` (~206 lines) | 41 (test_registry.py) | ✅ |
+| Gateway server | `gateway/server.py` (~401 lines) | 35 (test_gateway.py) | ✅ |
+| Gateway CLI | `gateway/cli.py` (~147 lines) | 20 (test_gateway_cli.py) | ✅ |
+| mTLS interceptor | `linuxcnc_fleet/auth.py` (~120 lines) | 18 (test_interceptor.py) | ✅ |
+| Server auth wiring | `linuxcnc_fleet/server.py` (updated) | — | ✅ |
+| CLI auth wiring | `linuxcnc_fleet/cli.py` (updated) | — | ✅ |
+
+### Key implementation notes
+- Gateway AuthManager uses `secret_key` parameter (not `secret`) and requires `issuer` + `audience`
+- mTLS interceptor uses callable-based user_extractor (decoupled from specific AuthManager)
+- FleetServiceRPC checks auth context for control/write/admin operations via role hierarchy
+- Gateway CLI validates args before starting server, exits with code 1 on validation errors
+- All tests pass: 281 total (73 Phase 1 + 208 Phase 2)
 
 ## When Implementing Phase 2+
 
