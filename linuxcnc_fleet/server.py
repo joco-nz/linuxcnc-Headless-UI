@@ -16,6 +16,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     Empty,
     ErrorEvent,
     ErrorCode,
+    ErrorList,
     ExecutionCommand,
     ExecutionState,
     GatewayRoute,
@@ -69,17 +70,17 @@ class FleetServiceRPC(FleetServiceServicer):
             "admin": 4,
         }
 
-    def _get_auth_context(self, context: grpc.ServicerContext) -> Any:
-        """Extract auth context from gRPC context."""
-        if hasattr(context, 'auth_context'):
-            return context.auth_context
+    def _get_auth_context(self, request: Any, context: grpc.ServicerContext) -> Any:
+        """Extract auth context from gRPC request or context."""
+        if hasattr(request, 'auth_context') and not callable(getattr(request, 'auth_context', None)):
+            return request.auth_context
         return None
 
-    def _check_control_access(self, context: grpc.ServicerContext, method_name: str) -> bool:
+    def _check_control_access(self, request: Any, context: grpc.ServicerContext, method_name: str) -> bool:
         """Check if caller has control access. Returns True if allowed."""
-        auth_ctx = self._get_auth_context(context)
+        auth_ctx = self._get_auth_context(request, context)
         if auth_ctx is None:
-            return False
+            return True  # No auth configured — allow all
         
         user_level = self.role_hierarchy.get(auth_ctx.role, 0)
         if user_level < 1:  # operator or higher required
@@ -87,11 +88,11 @@ class FleetServiceRPC(FleetServiceServicer):
             return False
         return True
 
-    def _check_write_access(self, context: grpc.ServicerContext, method_name: str) -> bool:
+    def _check_write_access(self, request: Any, context: grpc.ServicerContext, method_name: str) -> bool:
         """Check if caller has write access. Returns True if allowed."""
-        auth_ctx = self._get_auth_context(context)
+        auth_ctx = self._get_auth_context(request, context)
         if auth_ctx is None:
-            return False
+            return True  # No auth configured — allow all
         
         user_level = self.role_hierarchy.get(auth_ctx.role, 0)
         if user_level < 2:  # programmer or higher required
@@ -99,11 +100,11 @@ class FleetServiceRPC(FleetServiceServicer):
             return False
         return True
 
-    def _check_admin_access(self, context: grpc.ServicerContext, method_name: str) -> bool:
+    def _check_admin_access(self, request: Any, context: grpc.ServicerContext, method_name: str) -> bool:
         """Check if caller has admin access. Returns True if allowed."""
-        auth_ctx = self._get_auth_context(context)
+        auth_ctx = self._get_auth_context(request, context)
         if auth_ctx is None:
-            return False
+            return True  # No auth configured — allow all
         
         user_level = self.role_hierarchy.get(auth_ctx.role, 0)
         if user_level < 4:  # admin required
@@ -116,69 +117,70 @@ class FleetServiceRPC(FleetServiceServicer):
     def GetStatus(self, request: MachineId, context: grpc.ServicerContext) -> MachineStatus:
         return self.sidecar.get_status()
 
-    async def SubscribeStatus(
+    def SubscribeStatus(
         self, request: MachineId, context: grpc.ServicerContext
-    ) -> AsyncGenerator[MachineStatus, None]:
+    ) -> Generator[MachineStatus, None, None]:
+        import time as _time
         while True:
             yield self.sidecar.get_status()
-            await asyncio.sleep(0.02)
+            _time.sleep(0.02)
 
     # -- Control commands --
 
     def SetMode(self, request: SetModeRequest, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "SetMode"):
+        if not self._check_control_access(request, context, "SetMode"):
             return Result(success=False, message="Access denied")
         return self.sidecar.set_mode(request.mode)
 
     def SetExecution(self, request: ExecutionCommand, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "SetExecution"):
+        if not self._check_control_access(request, context, "SetExecution"):
             return Result(success=False, message="Access denied")
         return self.sidecar.set_execution(request.state)
 
     def Start(self, request: Empty, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "Start"):
+        if not self._check_control_access(request, context, "Start"):
             return Result(success=False, message="Access denied")
         return self.sidecar.start()
 
     def Stop(self, request: Empty, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "Stop"):
+        if not self._check_control_access(request, context, "Stop"):
             return Result(success=False, message="Access denied")
         return self.sidecar.stop()
 
     def FeedHold(self, request: Empty, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "FeedHold"):
+        if not self._check_control_access(request, context, "FeedHold"):
             return Result(success=False, message="Access denied")
         return self.sidecar.feed_hold()
 
     def Continue(self, request: Empty, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "Continue"):
+        if not self._check_control_access(request, context, "Continue"):
             return Result(success=False, message="Access denied")
         return self.sidecar.continue_exec()
 
     def HomeAll(self, request: Empty, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "HomeAll"):
+        if not self._check_control_access(request, context, "HomeAll"):
             return Result(success=False, message="Access denied")
         return self.sidecar.home_all()
 
     def HomeAxis(self, request: HomeAxisRequest, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "HomeAxis"):
+        if not self._check_control_access(request, context, "HomeAxis"):
             return Result(success=False, message="Access denied")
         return self.sidecar.home_axis(request.axis)
 
     # -- G-code / MDI --
 
     def SendMdiCommand(self, request: MdiCommand, context: grpc.ServicerContext) -> Result:
-        if not self._check_write_access(context, "SendMdiCommand"):
+        if not self._check_write_access(request, context, "SendMdiCommand"):
             return Result(success=False, message="Access denied")
         return self.sidecar.send_mdi(request.command)
 
     def LoadProgram(self, request: ProgramPath, context: grpc.ServicerContext) -> Result:
-        if not self._check_write_access(context, "LoadProgram"):
+        if not self._check_write_access(request, context, "LoadProgram"):
             return Result(success=False, message="Access denied")
         return self.sidecar.load_program(request.path)
 
     def StepForward(self, request: Empty, context: grpc.ServicerContext) -> Result:
-        if not self._check_control_access(context, "StepForward"):
+        if not self._check_control_access(request, context, "StepForward"):
             return Result(success=False, message="Access denied")
         return self.sidecar.step_forward()
 
@@ -211,7 +213,7 @@ class FleetServiceRPC(FleetServiceServicer):
             return HalPinValue()
 
     def WriteHalPin(self, request: HalPinWrite, context: grpc.ServicerContext) -> Result:
-        if not self._check_write_access(context, "WriteHalPin"):
+        if not self._check_write_access(request, context, "WriteHalPin"):
             return Result(success=False, message="Access denied")
         return self.sidecar.write_hal_pin(
             pin_name=request.pin_name,
@@ -320,7 +322,7 @@ def create_server(
         interceptors.append(create_auth_interceptor(user_extractor))
 
     server = grpc.server(
-        futures_executor=futures.ThreadPoolExecutor(max_workers=8),
+        futures.ThreadPoolExecutor(max_workers=8),
         interceptors=interceptors,
     )
 

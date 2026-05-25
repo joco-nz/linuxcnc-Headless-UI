@@ -44,7 +44,7 @@ def _make_mock_linuxcnc():
             self.state = mod.RCS_IDLE
             self.execution = mod.EXEC_STATE_IDLE
             self.interp_state = mod.INTERP_IDLE
-            self.estop_state = mod.ESTOP_ACK
+            self.estop_state = 0  # NOT_E_STOPPED (ESTOP_ACK=2 would block mode changes)
             self.mode = mod.MODE_MANUAL
             self.x = 0.0
             self.y = 0.0

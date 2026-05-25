@@ -32,6 +32,7 @@ from linuxcnc_fleet.fleet_pb2 import (
 )
 from linuxcnc_fleet.fleet_pb2_grpc import (
     FleetGatewayServiceServicer,
+    FleetServiceStub,
     add_FleetGatewayServiceServicer_to_server,
 )
 
@@ -321,7 +322,6 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
                 clients.append((target.id, client))
 
         # Stream status from each machine using separate threads
-        import threading
         import queue
 
         streams: dict[str, queue.Queue] = {mid: queue.Queue() for mid, _ in clients}
@@ -348,6 +348,8 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
         try:
             # Interleave status updates from all machines
             while not stop_event.is_set():
+                if not context.is_active():
+                    break
                 for mid, q in streams.items():
                     try:
                         status = q.get(timeout=0.1)

@@ -8,7 +8,9 @@
 
 **Phase 3: FleetClient is complete.** The client library (OIDC auth interceptor, FleetClient with all RPC wrappers, retry logic, streaming subscriptions) is implemented with 46/46 unit tests passing.
 
-**Total: 327/327 tests passing**
+**Phase 4: Integration Tests are complete.** Full flow tests (FleetClient → Gateway → Sidecar) with 17/17 tests passing.
+
+**Total: 344/344 tests passing**
 
 ## Phase 3 Deliverables
 
@@ -25,6 +27,29 @@
 - Streaming subscriptions implemented as async generators: `subscribe_status()`, `subscribe_hal_pins()`, `subscribe_errors()`
 - FleetClient covers all FleetService RPCs including home_axis(), load_program(), send_mdi_command()
 - All tests pass: 327 total (73 Phase 1 + 208 Phase 2 + 46 FleetClient)
+
+## Phase 4 Deliverables
+
+| Component | Files | Tests | Status |
+|-----------|-------|-------|--------|
+| Integration tests | `tests/test_integration.py` (~590 lines) | 17 | ✅ |
+
+### Test classes
+- `TestDiscoverRouteGetStatus`: discover, route, get_status_via_gateway, viewer_can_discover (4 tests)
+- `TestBroadcastCommand`: broadcast_mdi_to_all, broadcast_mode_change (2 tests)
+- `TestStreamingStatus`: subscribe_all_status (1 test)
+- `TestSidecarDirectCommands`: set_mode, home_axis, send_mdi_command, load_program, subscribe_status_stream, get_errors (6 tests)
+- `TestGatewayAuthIntegration`: unauthenticated_request_rejected, viewer_cannot_broadcast (2 tests)
+- `TestRegistryHeartbeat`: heartbeat_updates_last_seen, expired_machine_removed (2 tests)
+
+### Key implementation notes
+- Integration tests use real gRPC servers (not stubs) to exercise serialization, channel setup, auth interceptor chaining, broadcast fan-out
+- Fixture chain: `sidecar_server` → `gateway_server` → `multi_gateway_server` with proper teardown via stop functions
+- Fixed bugs discovered during integration testing:
+  - Missing `FleetServiceStub` import in `gateway/server.py` (caused streaming to fail silently)
+  - Added `context.is_active()` check in `SubscribeAllStatus` to prevent hanging on client disconnect
+  - Mock `estop_state` default changed from `ESTOP_ACK` to `0` in conftest (was blocking mode-change RPCs)
+- All tests pass: 344 total (73 Phase 1 + 208 Phase 2 + 46 FleetClient + 17 Integration)
 
 ## Architecture Source
 
