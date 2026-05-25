@@ -12,6 +12,17 @@ from typing import Any, AsyncGenerator, Optional
 import grpc
 
 from fleet_client.auth import BearerAuthInterceptor, create_auth_interceptor
+from linuxcnc_fleet.fleet_pb2 import (
+    BroadcastRequest,
+    DiscoverRequest,
+    ExecutionCommand,
+    GatewayRoute,
+    MachineId,
+    MachineInfo,
+    MdiCommand,
+    SetModeRequest,
+    SubscribeAllRequest,
+)
 
 log = logging.getLogger(__name__)
 
@@ -175,3 +186,225 @@ class FleetClient:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit."""
         await self.close()
+
+    # -----------------------------------------------------------------------
+    # GatewayService RPCs
+    # -----------------------------------------------------------------------
+
+    async def get_machines(
+        self, facility: Optional[str] = None
+    ) -> list[MachineEntry]:
+        """Discover available machines in the fleet.
+        
+        Args:
+            facility: Optional facility filter to narrow results
+            
+        Returns:
+            List of MachineEntry for visible machines
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+        
+        try:
+            request = DiscoverRequest(facility=facility or "")
+            response = await self._gateway_stub.DiscoverMachines(request)
+            
+            return [
+                MachineEntry(
+                    machine_id=m.machine_id,
+                    machine_name=m.machine_name,
+                    host_address=m.host_address,
+                    version=m.version or None,
+                    num_joints=m.num_joints,
+                    num_hal_components=m.num_hal_components,
+                )
+                for m in response.machines
+            ]
+        except grpc.aio.AioRpcError as e:
+            log.error("DiscoverMachines failed: %s", e.details())
+            raise
+
+    async def route_machine(self, machine_id: str) -> tuple[str, int]:
+        """Route a machine ID to its address:port.
+        
+        Args:
+            machine_id: Unique machine identifier
+            
+        Returns:
+            Tuple of (host_address, port)
+            
+        Raises:
+            grpc.aio.AioRpcError: If machine not found or access denied
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+        
+        try:
+            request = MachineId(id=machine_id)
+            response: GatewayRoute = await self._gateway_stub.RouteMachine(request)
+            return (response.instance_address, response.instance_port)
+        except grpc.aio.AioRpcError as e:
+            log.error("RouteMachine failed for %s: %s", machine_id, e.details())
+            raise
+
+    async def broadcast_command(
+        self,
+        scope: str,
+        command_type: str,
+        command_value: Any,
+        facility: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, tuple[bool, str]]:
+        """Broadcast a command to multiple machines based on scope.
+        
+        Args:
+            scope: Scope type - "ALL", "FACILITY", or "TAG"
+            command_type: Command type - "mdi", "execution", or "mode"
+            command_value: Command-specific value (string for MDI, int for execution/mode)
+            facility: Facility filter (required for FACILITY scope)
+            tags: Tag filter (required for TAG scope)
+            
+        Returns:
+            Dict mapping machine_id to (success: bool, message: str)
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+        
+        # Map scope string to proto enum value
+        scope_map = {"ALL": 0, "FACILITY": 1, "TAG": 2}
+        scope_value = scope_map.get(scope, 0)
+        
+        # Build broadcast request
+        request = BroadcastRequest(
+            scope=scope_value,
+            facility=facility or "",
+            tags=tags or [],
+        )
+        
+        # Set command based on type
+        if command_type == "mdi":
+            request.mdi.command = str(command_value)
+        elif command_type in ("execution", "mode"):
+            request.exec.state = int(command_value) if command_type == "execution" else int(command_value)
+        else:
+            raise ValueError(f"Unknown command type: {command_type}")
+        
+        try:
+            response = await self._gateway_stub.BroadcastCommand(request)
+            
+            results = {}
+            for machine_id, result in response.results.items():
+                results[machine_id] = (result.success, result.message)
+            
+            return results
+        except grpc.aio.AioRpcError as e:
+            log.error("BroadcastCommand failed: %s", e.details())
+            raise
+
+    async def broadcast_mdi(
+        self,
+        scope: str,
+        command: str,
+        facility: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, tuple[bool, str]]:
+        """Send MDI command to all matching machines.
+        
+        Args:
+            scope: Scope type - "ALL", "FACILITY", or "TAG"
+            command: MDI command string
+            facility: Facility filter (required for FACILITY scope)
+            tags: Tag filter (required for TAG scope)
+            
+        Returns:
+            Dict mapping machine_id to (success: bool, message: str)
+        """
+        return await self.broadcast_command(
+            scope=scope,
+            command_type="mdi",
+            command_value=command,
+            facility=facility,
+            tags=tags,
+        )
+
+    async def broadcast_execution(
+        self,
+        scope: str,
+        state: int,
+        facility: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, tuple[bool, str]]:
+        """Send execution command to all matching machines.
+        
+        Args:
+            scope: Scope type - "ALL", "FACILITY", or "TAG"
+            state: Execution state value (from proto enum)
+            facility: Facility filter (required for FACILITY scope)
+            tags: Tag filter (required for TAG scope)
+            
+        Returns:
+            Dict mapping machine_id to (success: bool, message: str)
+        """
+        return await self.broadcast_command(
+            scope=scope,
+            command_type="execution",
+            command_value=state,
+            facility=facility,
+            tags=tags,
+        )
+
+    async def broadcast_mode(
+        self,
+        scope: str,
+        mode: int,
+        facility: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, tuple[bool, str]]:
+        """Send mode command to all matching machines.
+        
+        Args:
+            scope: Scope type - "ALL", "FACILITY", or "TAG"
+            mode: Mode value (from proto enum)
+            facility: Facility filter (required for FACILITY scope)
+            tags: Tag filter (required for TAG scope)
+            
+        Returns:
+            Dict mapping machine_id to (success: bool, message: str)
+        """
+        return await self.broadcast_command(
+            scope=scope,
+            command_type="mode",
+            command_value=mode,
+            facility=facility,
+            tags=tags,
+        )
+
+    async def subscribe_all_status(
+        self,
+        facility: Optional[str] = None,
+        poll_interval: float = 0.5,
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        """Stream status updates from all machines in scope.
+        
+        Args:
+            facility: Optional facility filter
+            poll_interval: Poll interval in seconds
+            
+        Yields:
+            Tuples of (machine_id, MachineStatus)
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+        
+        try:
+            request = SubscribeAllRequest(
+                facility=facility or "",
+                poll_interval_seconds=poll_interval,
+            )
+            
+            call = self._gateway_stub.SubscribeAllStatus(request)
+            async for status in call:
+                yield (status.machine_id, status)
+        except grpc.aio.AioRpcError as e:
+            log.error("SubscribeAllStatus failed: %s", e.details())
+            raise
