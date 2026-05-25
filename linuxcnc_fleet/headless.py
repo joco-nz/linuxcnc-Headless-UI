@@ -22,6 +22,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     BroadcastRequest,
     ErrorEvent,
     ErrorCode,
+    EstopState,
     ExecutionCommand,
     ExecutionState,
     HalComponentInfo,
@@ -214,8 +215,8 @@ class LinuxCncSidecar:
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name="sidecar-poller")
         self._poll_thread.start()
 
-    def stop(self) -> None:
-        """Stop the polling loop."""
+    def shutdown(self) -> None:
+        """Stop the polling loop and clean up resources."""
         self._running = False
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=2.0)
@@ -367,7 +368,7 @@ class LinuxCncSidecar:
                 build_type=build_type,
                 git_hash=git_hash,
             ),
-            num_joints=self._snapshot.num_joints,
+            num_joints=self._stat.joint_config[0] if len(self._stat.joint_config) > 0 else 0,
             num_hal_components=0,  # populated by HAL enumeration
         )
 
@@ -472,7 +473,7 @@ class LinuxCncSidecar:
 
     def set_mode(self, mode: Mode) -> Result:
         """Set machine mode with validation."""
-        if self._snapshot.estop_state == EstopState.E_STOPPED.value:
+        if self._snapshot.estop_state == EstopState.E_STOPPED:
             return Result(
                 success=False, message="Cannot change mode — E-stop is active",
                 error_code=ErrorCode.E_STOP_ACTIVE,
@@ -482,7 +483,7 @@ class LinuxCncSidecar:
             mode_map = {
                 Mode.MODE_MANUAL: linuxcnc.MODE_MANUAL,
                 Mode.MODE_AUTO: linuxcnc.MODE_AUTO,
-                Mode.MODE_MDI: linuxcnc.MODE_MDI,
+                Mode.MODE_MDA: linuxcnc.MODE_MDI,
             }
             lcnc_mode = mode_map.get(mode)
             if lcnc_mode is None:
@@ -524,7 +525,7 @@ class LinuxCncSidecar:
                 self._command.retract(True)
             elif state == ExecutionState.MDA:
                 # Switch to MDA mode if not already
-                self.set_mode(Mode.MODE_MDI)
+                self.set_mode(Mode.MODE_MDA)
 
             return Result(success=True, message=f"Execution set to {state}")
         except Exception as e:

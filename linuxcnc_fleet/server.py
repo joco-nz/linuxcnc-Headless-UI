@@ -311,4 +311,4 @@ def run_server(
     except KeyboardInterrupt:
         log.info("Shutting down gRPC server")
         server.stop(grace=5)
-        sidecar.stop()
+        sidecar.shutdown()

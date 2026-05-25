@@ -840,17 +840,23 @@ python -m fleet_ui --gateway localhost:50050
 
 ## Implementation Phases
 
-### Phase 1: Core Sidecar (Week 1-2)
-- [ ] Define and generate `fleet.proto` with FleetService RPCs
-- [ ] Implement `LinuxCncSidecar` class in `headless.py`
-  - [ ] Polling loop at 50Hz with atomic snapshot updates
-  - [ ] Status extraction from linuxcnc.stat
-  - [ ] Mode/executive control wrappers
-  - [ ] HAL pin read/write via _hal module
-  - [ ] INI param access
-- [ ] Implement gRPC server in `server.py`
-- [ ] Write systemd service template
-- [ ] Test against a single LinuxCNC instance (uspace mode)
+### Phase 1: Core Sidecar (Week 1-2) ✅ COMPLETE
+- [x] Define and generate `fleet.proto` with FleetService RPCs
+- [x] Implement `LinuxCncSidecar` class in `headless.py`
+  - [x] Polling loop at 50Hz with atomic snapshot updates
+  - [x] Status extraction from linuxcnc.stat
+  - [x] Mode/executive control wrappers
+  - [x] HAL pin read/write via _hal module
+  - [x] INI param access
+- [x] Implement gRPC server in `server.py`
+- [x] CLI entry point with TLS/mTLS validation (`linuxcnc_fleet/cli.py`)
+- [ ] Write systemd service template (deferred)
+- [ ] Test against a single LinuxCNC instance (uspace mode) — requires target machine
+- [x] Unit tests: state mapping correctness (20 tests, `test_state_mapping.py`)
+- [x] Unit tests: snapshot immutability and atomic swap behavior (7 tests, `test_snapshot.py`)
+- [x] Unit tests: CLI argument parsing and TLS validation (18 tests, `test_cli.py`)
+- [x] Unit tests: control command error paths (28 tests, `test_sidecar.py`)
+- **Total: 73/73 tests passing**
 
 ### Phase 2: Gateway & Auth (Week 3-4)
 - [ ] Implement FleetGatewayService RPCs
@@ -859,6 +865,10 @@ python -m fleet_ui --gateway localhost:50050
 - [ ] Machine registration and heartbeat mechanism
 - [ ] Broadcast command fan-out
 - [ ] TLS/mTLS certificate management
+- [ ] Unit tests: OIDC token parsing and expiration checks
+- [ ] Unit tests: RBAC policy evaluation (role + facility + tags filtering)
+- [ ] Unit tests: machine registry CRUD and TTL expiry
+- [ ] Unit tests: broadcast fan-out with per-result tracking
 
 ### Phase 3: Client Library & UI Integration (Week 5-6)
 - [ ] Implement `FleetClient` high-level library
@@ -866,6 +876,9 @@ python -m fleet_ui --gateway localhost:50050
 - [ ] Channel caching and connection management
 - [ ] Streaming status subscription support
 - [ ] Error handling and retry logic
+- [ ] Unit tests: FleetClient routing and channel caching
+- [ ] Unit tests: streaming subscription lifecycle (start/stop)
+- [ ] Unit tests: error handling and retry backoff behavior
 
 ### Phase 4: Hardening & Packaging (Week 7-8)
 - [ ] Central UI integration tests against gateway + sidecar
@@ -873,6 +886,9 @@ python -m fleet_ui --gateway localhost:50050
 - [ ] Package distribution (pip wheel)
 - [ ] Certificate auto-renewal support
 - [ ] Metrics/health endpoints (Prometheus / HTTP)
+- [ ] Integration tests: full flow — UI → gateway → sidecar → linuxcnc.stat
+- [ ] Integration tests: TLS/mTLS handshake verification
+- [ ] Integration tests: broadcast to multiple instances with mixed results
 
 ---
 
