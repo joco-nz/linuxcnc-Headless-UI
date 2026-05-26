@@ -266,26 +266,56 @@ class FleetServiceRPC(FleetServiceServicer):
 class GatewayServiceRPC(FleetGatewayServiceServicer):
     """Minimal gateway servicer. Full implementation lives in gateway/server.py."""
 
+    def __init__(self, auth_manager=None, user_extractor=None) -> None:
+        self._auth_manager = auth_manager
+        self._user_extractor = user_extractor
+
+    def _validate_auth(self, context: grpc.ServicerContext) -> Optional[Any]:
+        """Validate OIDC token from gRPC metadata. Returns user object or aborts context."""
+        if self._auth_manager is not None:
+            try:
+                metadata = dict(context.invocation_metadata())
+                return self._auth_manager.extract_user(metadata)
+            except Exception as e:
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, str(e))
+                return None
+        elif self._user_extractor is not None:
+            try:
+                metadata = dict(context.invocation_metadata())
+                return self._user_extractor(metadata)
+            except Exception as e:
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, str(e))
+                return None
+        return None
+
     def DiscoverMachines(
         self, request: DiscoverRequest, context: grpc.ServicerContext
     ) -> MachineList:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
+        user = self._validate_auth(context)
+        if user is not None:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         return MachineList()
 
     def RouteMachine(self, request: MachineId, context: grpc.ServicerContext) -> GatewayRoute:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
+        user = self._validate_auth(context)
+        if user is not None:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         return GatewayRoute()
 
     def BroadcastCommand(
         self, request: BroadcastRequest, context: grpc.ServicerContext
     ) -> BroadcastResult:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
+        user = self._validate_auth(context)
+        if user is not None:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         return BroadcastResult()
 
     def SubscribeAllStatus(
         self, request: SubscribeAllRequest, context: grpc.ServicerContext
     ) -> Generator[MachineStatus, None, None]:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
+        user = self._validate_auth(context)
+        if user is not None:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         yield MachineStatus()
 
 
@@ -330,7 +360,7 @@ def create_server(
     add_FleetServiceServicer_to_server(fleet_servicer, server)
 
     if use_gateway:
-        gateway_servicer = GatewayServiceRPC()
+        gateway_servicer = GatewayServiceRPC(user_extractor=user_extractor)
         add_FleetGatewayServiceServicer_to_server(gateway_servicer, server)
 
     if cert_file and key_file:

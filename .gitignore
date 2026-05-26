@@ -17,12 +17,12 @@ build/
 venv/
 
 # Generated gRPC code (regenerated from proto)
-linuxcnc_fleet/fleet_pb2.py
-linuxcnc_fleet/fleet_pb2_grpc.py
 gateway/gateway_pb2.py
 gateway/gateway_pb2_grpc.py
 fleet_client/client_pb2.py
 fleet_client/client_pb2_grpc.py
+
+# Root-level generated files (development convenience only)
 *_pb2.py
 *_pb2_grpc.py
 

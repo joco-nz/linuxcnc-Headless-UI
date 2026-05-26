@@ -658,12 +658,20 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
         self._client_cache: dict[str, _GrpcClient] = {}  # per-machine gRPC channel cache
 
     def DiscoverMachines(self, request, context):
+        # NOTE: Type hint should be DiscoverRequest (proto message), not DiscoveryRequest
         user = self.auth.extract_user(context.invocation_metadata())
-        facility = request.facility or user.facility
-        machines = self.registry.list_all()
-        # Filter by user's authorized machines based on scope
-        authorized = [m for m in machines if self._check_access(user, m)]
-        return MachineList(machines=authorized)
+
+        # Resolve facility from request or user claims separately
+        user_facility = getattr(user, 'facility', None)
+        request_facility = request.facility if request.facility else None
+
+        all_machines = self.registry.list_all()
+        filtered = self.policies.filter_machines_by_scope(
+            user.role, user_facility, [...])
+
+        # Narrow by request facility if provided
+        if request_facility:
+            filtered = [m for m in filtered if m.get('facility') == request_facility]
 
     def RouteMachine(self, request, context):
         user = self.auth.extract_user(context.invocation_metadata())
@@ -1034,6 +1042,7 @@ python -m fleet_ui --gateway localhost:50050
   - [x] Callable-based user_extractor (decoupled from specific AuthManager)
 - [x] Server auth wiring (`linuxcnc_fleet/server.py`) — FleetServiceRPC integrates interceptor
 - [x] CLI auth wiring (`linuxcnc_fleet/cli.py`) — --jwt-secret/--jwks-url args, creates user_extractor
+  - **Known bug**: `AuthManager(secret=...)` should be `AuthManager(secret_key=...)` (line 117 of cli.py)
 - [x] Unit tests: OIDC token parsing and expiration checks (31 tests, `test_auth.py`)
 - [x] Unit tests: RBAC policy evaluation — role + facility + tags filtering (62 tests, `test_policies.py`)
 - [x] Unit tests: machine registry CRUD and TTL expiry (41 tests, `test_registry.py`)
@@ -1060,7 +1069,7 @@ python -m fleet_ui --gateway localhost:50050
 - [x] Unit tests: async context manager (2 tests, `test_fleet_client.py`)
 - **Cumulative: 327/327 tests passing** (281 + 46 FleetClient)
 
-### Phase 4: Hardening & Packaging (Week 7-8) ✅ COMPLETE (Integration Tests)
+### Phase 4: Hardening & Packaging (Week 7-8) ✅ COMPLETE (Integration Tests + Packaging)
 - [x] Integration tests: full flow — FleetClient → Gateway → Sidecar → linuxcnc.stat (17 tests, `test_integration.py`)
   - [x] `TestDiscoverRouteGetStatus`: discover, route, get_status_via_gateway, viewer_can_discover (4 tests)
   - [x] `TestBroadcastCommand`: broadcast_mdi_to_all, broadcast_mode_change (2 tests)
@@ -1070,10 +1079,20 @@ python -m fleet_ui --gateway localhost:50050
   - [x] `TestRegistryHeartbeat`: heartbeat_updates_last_seen, expired_machine_removed (2 tests)
 - **Cumulative: 344/344 tests passing** (327 + 17 Integration)
 - All integration tests use real gRPC servers (not stubs) to exercise serialization, channel setup, auth interceptor chaining, broadcast fan-out
+- [x] Package distribution (pip wheel) — `linuxcnc-fleet` package with `[sidecar]`, `[gateway]`, `[client]`, `[dev]` extras
 - [ ] Load testing: concurrent connections, broadcast performance
-- [ ] Package distribution (pip wheel)
 - [ ] Certificate auto-renewal support
 - [ ] Metrics/health endpoints (Prometheus / HTTP)
+
+---
+
+## Known Issues
+
+| # | File | Line | Issue | Severity | Status |
+|---|------|------|-------|----------|--------|
+| 1 | `gateway/server.py` | 133 | Type hint `DiscoveryRequest` doesn't exist — should be `DiscoverRequest` | Low | ✅ Fixed |
+| 2 | `linuxcnc_fleet/cli.py` | 117 | `AuthManager(secret=...)` should be `AuthManager(secret_key=...)` | High | ✅ Fixed |
+| 3 | `fleet_client/client.py` | 187-191 | `_get_or_create_machine_channel()` creates `insecure_channel` even when `tls_enabled=True` | Medium | ✅ Fixed |
 
 ---
 

@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> None:
         try:
             from gateway.auth import AuthManager
             auth_manager = AuthManager(
-                secret=args.jwt_secret,
+                secret_key=args.jwt_secret,
                 jwks_url=args.jwks_url,
                 issuer=args.issuer,
                 audience=args.audience,

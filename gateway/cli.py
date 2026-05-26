@@ -128,11 +128,16 @@ def main(argv: Optional[list[str]] = None) -> None:
     registry = MachineRegistry()
 
     try:
+        tls_enabled = args.cert is not None and args.key is not None
         run_gateway_server(
             auth_manager=auth_manager,
             policy_engine=policy_engine,
             registry=registry,
             port=args.port,
+            tls_enabled=tls_enabled,
+            cert_file=args.cert,
+            key_file=args.key,
+            root_cert_file=args.root_cert,
         )
     except KeyboardInterrupt:
         log.info("Gateway server interrupted")

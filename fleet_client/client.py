@@ -185,8 +185,9 @@ class FleetClient:
             # Create new channel
             if self._tls_enabled:
                 creds = grpc.ssl_channel_credentials()
-                channel = grpc.insecure_channel(
+                channel = grpc.secure_channel(
                     f"{address}:{port}",
+                    creds,
                     interceptors=[create_auth_interceptor(self._token)],
                 )
             else:

@@ -42,15 +42,44 @@ log = logging.getLogger(__name__)
 class _GrpcClient:
     """Thin wrapper around a gRPC channel to a single machine."""
 
-    def __init__(self, address: str, port: int) -> None:
+    def __init__(
+        self,
+        address: str,
+        port: int,
+        tls_enabled: bool = False,
+        cert_file: Optional[str] = None,
+        key_file: Optional[str] = None,
+        root_cert_file: Optional[str] = None,
+    ) -> None:
         self._address = address
         self._port = port
+        self._tls_enabled = tls_enabled
+        self._cert_file = cert_file
+        self._key_file = key_file
+        self._root_cert_file = root_cert_file
         self._channel: Optional[grpc.Channel] = None
+
+    def _build_credentials(self) -> grpc.ChannelCredentials:
+        if not self._tls_enabled or not self._cert_file:
+            return None
+        with open(self._cert_file, "rb") as f:
+            cert = f.read()
+        with open(self._key_file, "rb") as f:
+            private_key = f.read()
+        if self._root_cert_file:
+            with open(self._root_cert_file, "rb") as f:
+                root_certs = f.read()
+            return grpc.ssl_channel_credentials(root_certs, private_key, cert)
+        return grpc.ssl_channel_credentials(None, private_key, cert)
 
     def connect(self) -> grpc.Channel:
         if self._channel is None:
             target = f"{self._address}:{self._port}"
-            self._channel = grpc.insecure_channel(target)
+            creds = self._build_credentials()
+            if creds:
+                self._channel = grpc.secure_channel(target, creds)
+            else:
+                self._channel = grpc.insecure_channel(target)
         return self._channel
 
     def close(self) -> None:
@@ -67,12 +96,20 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
         auth_manager: AuthManager,
         policy_engine: PolicyEngine,
         registry: MachineRegistry,
+        tls_enabled: bool = False,
+        cert_file: Optional[str] = None,
+        key_file: Optional[str] = None,
+        root_cert_file: Optional[str] = None,
     ) -> None:
         self.auth = auth_manager
         self.policies = policy_engine
         self.registry = registry
         self._client_cache: dict[str, _GrpcClient] = {}
         self._client_lock = threading.Lock()
+        self._tls_enabled = tls_enabled
+        self._cert_file = cert_file
+        self._key_file = key_file
+        self._root_cert_file = root_cert_file
 
     def _get_user(self, context: grpc.ServicerContext) -> User:
         """Extract and validate user from gRPC metadata."""
@@ -126,11 +163,17 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
         """Get or create a gRPC client for a machine entry."""
         with self._client_lock:
             if entry.id not in self._client_cache:
-                self._client_cache[entry.id] = _GrpcClient(entry.address, entry.port)
+                self._client_cache[entry.id] = _GrpcClient(
+                    entry.address, entry.port,
+                    tls_enabled=self._tls_enabled,
+                    cert_file=self._cert_file,
+                    key_file=self._key_file,
+                    root_cert_file=self._root_cert_file,
+                )
             return self._client_cache[entry.id]
 
     def DiscoverMachines(
-        self, request: DiscoveryRequest, context: grpc.ServicerContext
+        self, request: DiscoverRequest, context: grpc.ServicerContext
     ) -> MachineList:
         """Discover machines visible to the authenticated user."""
         user = self._get_user(context)
@@ -369,12 +412,39 @@ def create_gateway_server(
     policy_engine: PolicyEngine,
     registry: MachineRegistry,
     port: int = 50051,
+    tls_enabled: bool = False,
+    cert_file: Optional[str] = None,
+    key_file: Optional[str] = None,
+    root_cert_file: Optional[str] = None,
 ) -> grpc.Server:
     """Create a gRPC server with the gateway service registered."""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    servicer = GatewayServiceServicer(auth_manager, policy_engine, registry)
+    servicer = GatewayServiceServicer(
+        auth_manager, policy_engine, registry,
+        tls_enabled=tls_enabled,
+        cert_file=cert_file,
+        key_file=key_file,
+        root_cert_file=root_cert_file,
+    )
     add_FleetGatewayServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{port}")
+    if tls_enabled and cert_file and key_file:
+        with open(cert_file, "rb") as f:
+            cert = f.read()
+        with open(key_file, "rb") as f:
+            private_key = f.read()
+        if root_cert_file:
+            with open(root_cert_file, "rb") as f:
+                root_certs = f.read()
+            creds = grpc.ssl_server_credentials(
+                [(private_key, cert)],
+                root_certificates=root_certs,
+                require_client_auth=True,
+            )
+        else:
+            creds = grpc.ssl_server_credentials([(private_key, cert)])
+        server.add_secure_port(f"[::]:{port}", creds)
+    else:
+        server.add_insecure_port(f"[::]:{port}")
     return server
 
 
@@ -383,11 +453,21 @@ def run_gateway_server(
     policy_engine: PolicyEngine,
     registry: MachineRegistry,
     port: int = 50051,
+    tls_enabled: bool = False,
+    cert_file: Optional[str] = None,
+    key_file: Optional[str] = None,
+    root_cert_file: Optional[str] = None,
 ) -> None:
     """Create and run the gateway gRPC server (blocking)."""
     import signal
 
-    server = create_gateway_server(auth_manager, policy_engine, registry, port)
+    server = create_gateway_server(
+        auth_manager, policy_engine, registry, port,
+        tls_enabled=tls_enabled,
+        cert_file=cert_file,
+        key_file=key_file,
+        root_cert_file=root_cert_file,
+    )
     server.start()
     log.info("Gateway server started on port %d", port)
 

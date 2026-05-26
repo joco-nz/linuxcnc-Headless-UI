@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import logging
@@ -110,19 +111,24 @@ class AuthManager:
         return self._convert_jwk_to_pem(matching_keys[0], alg)
 
     @staticmethod
+    def _jwk_decode_base64(urlsafe_b64: str) -> bytes:
+        """Decode base64url-encoded data with proper padding."""
+        padding = 4 - len(urlsafe_b64) % 4
+        if padding != 4:
+            urlsafe_b64 += "=" * padding
+        return base64.urlsafe_b64decode(urlsafe_b64)
+
+    @staticmethod
     def _convert_jwk_to_pem(jwk: dict[str, Any], alg: str) -> str:
         """Convert a JWK to PEM format for PyJWT."""
         from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
 
         if jwk.get("kty") != "RSA":
             raise TokenValidationError(f"Unsupported key type: {jwk.get('kty')}")
 
-        n = int.from_bytes(jwt.api_jwk._decode_base64(jwk["n"]), "big")  # noqa: SLF001
-        e = int.from_bytes(jwt.api_jwk._decode_base64(jwk["e"]), "big")  # noqa: SLF001
-
-        # Build RSA public key from components
-        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
+        n = int.from_bytes(AuthManager._jwk_decode_base64(jwk["n"]), "big")
+        e = int.from_bytes(AuthManager._jwk_decode_base64(jwk["e"]), "big")
 
         rsa_numbers = RSAPublicNumbers(e, n)
         public_key = rsa_numbers.public_key()
