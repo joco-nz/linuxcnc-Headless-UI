@@ -173,6 +173,23 @@ def pytest_configure(config):
     sys.modules["_hal"] = hal
 
 
+def pytest_unconfigure(config):
+    """Suppress pyvirtualdisplay/pytest-xvfb logging errors during teardown.
+
+    The virtual display plugin tries to log after pytest has already closed
+    stdout/stderr, causing "ValueError: I/O operation on closed file" tracebacks.
+    Removing logging handlers before the cleanup phase prevents this.
+    """
+    import logging
+
+    for handler in logging.root.handlers[:]:
+        try:
+            handler.close()
+        except (OSError, ValueError):
+            pass
+        logging.root.removeHandler(handler)
+
+
 @pytest.fixture
 def linuxcnc_module():
     """Provide the mock linuxcnc module (for state mapping tests)."""

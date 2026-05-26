@@ -206,7 +206,7 @@ class AuthManager:
         self._jwks_expires_at = 0.0
 
 
-def create_test_auth_manager(secret_key: str = "test-secret-key") -> AuthManager:
+def create_test_auth_manager(secret_key: str = "test-secret-key-for-testing-32bytes!") -> AuthManager:
     """Create an AuthManager configured for testing with HS256."""
     return AuthManager(
         issuer="https://test.auth.example.com",
@@ -216,7 +216,7 @@ def create_test_auth_manager(secret_key: str = "test-secret-key") -> AuthManager
     )
 
 
-def create_test_token(claims: dict[str, Any], secret_key: str = "test-secret-key") -> str:
+def create_test_token(claims: dict[str, Any], secret_key: str = "test-secret-key-for-testing-32bytes!") -> str:
     """Create a test JWT for unit tests."""
     now = int(time.time())
     payload = {

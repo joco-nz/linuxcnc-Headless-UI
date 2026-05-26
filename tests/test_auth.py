@@ -68,8 +68,8 @@ class TestAuthManager:
         assert auth.algorithms == ["HS256"]
 
     def test_create_test_auth_manager_custom_secret(self):
-        auth = create_test_auth_manager(secret_key="custom-secret")
-        assert auth.secret_key == "custom-secret"
+        auth = create_test_auth_manager(secret_key="custom-secret-key-for-test-32bytes!!")
+        assert auth.secret_key == "custom-secret-key-for-test-32bytes!!"
 
     def test_validate_token_success(self):
         auth = create_test_auth_manager()
@@ -111,7 +111,7 @@ class TestAuthManager:
             "aud": "linuxcnc-fleet",
             "sub": "expired-user",
         }
-        token = jwt.encode(payload, "test-secret-key", algorithm="HS256")
+        token = jwt.encode(payload, "test-secret-key-for-testing-32bytes!", algorithm="HS256")
         with pytest.raises(TokenValidationError, match="expired"):
             auth.validate_token(token)
 
@@ -123,7 +123,7 @@ class TestAuthManager:
             "aud": "linuxcnc-fleet",
             "sub": "evil-user",
         }
-        token = jwt.encode(payload, "test-secret-key", algorithm="HS256")
+        token = jwt.encode(payload, "test-secret-key-for-testing-32bytes!", algorithm="HS256")
         with pytest.raises(TokenValidationError, match="Invalid issuer"):
             auth.validate_token(token)
 
@@ -135,19 +135,19 @@ class TestAuthManager:
             "aud": "wrong-audience",
             "sub": "aud-user",
         }
-        token = jwt.encode(payload, "test-secret-key", algorithm="HS256")
+        token = jwt.encode(payload, "test-secret-key-for-testing-32bytes!", algorithm="HS256")
         with pytest.raises(TokenValidationError, match="Invalid audience"):
             auth.validate_token(token)
 
     def test_validate_token_wrong_secret(self):
-        auth = create_test_auth_manager(secret_key="correct-secret")
+        auth = create_test_auth_manager(secret_key="correct-secret-key-for-test-32bytes!!!")
         payload = {
             "exp": int(time.time()) + 3600,
             "iss": "https://test.auth.example.com",
             "aud": "linuxcnc-fleet",
             "sub": "wrong-secret-user",
         }
-        token = jwt.encode(payload, "wrong-secret", algorithm="HS256")
+        token = jwt.encode(payload, "wrong-secret-key-for-test-32bytes!!!!", algorithm="HS256")
         with pytest.raises(TokenValidationError):
             auth.validate_token(token)
 
@@ -155,7 +155,7 @@ class TestAuthManager:
         auth = create_test_auth_manager()
         # Missing required claims (exp, iss, aud, sub)
         payload = {"sub": "no-exp"}
-        token = jwt.encode(payload, "test-secret-key", algorithm="HS256")
+        token = jwt.encode(payload, "test-secret-key-for-testing-32bytes!", algorithm="HS256")
         with pytest.raises(TokenValidationError):
             auth.validate_token(token)
 
@@ -247,10 +247,10 @@ class TestAuthManager:
 
     def test_different_secret_keys(self):
         """Test that different AuthManagers can use different secrets."""
-        auth1 = create_test_auth_manager(secret_key="secret-1")
-        auth2 = create_test_auth_manager(secret_key="secret-2")
+        auth1 = create_test_auth_manager(secret_key="secret-key-one-for-testing-32bytes!!!")
+        auth2 = create_test_auth_manager(secret_key="secret-key-two-for-testing-32bytes!!!!")
 
-        token = create_test_token({"sub": "user-1"}, secret_key="secret-1")
+        token = create_test_token({"sub": "user-1"}, secret_key="secret-key-one-for-testing-32bytes!!!")
 
         # Token signed with secret-1 validates against auth1
         user1 = auth1.validate_token(token)
@@ -271,7 +271,7 @@ class TestAuthManager:
         auth = AuthManager(
             issuer="https://test.example.com",
             audience="fleet",
-            secret_key="key",
+            secret_key="key-for-testing-32bytes-minimum-length!!!",
             algorithms=["RS256"],  # Only RS256 allowed, no HS256
         )
         # Token with HS256 should fail because it's not in the allowed list
@@ -281,7 +281,7 @@ class TestAuthManager:
             "aud": "fleet",
             "sub": "user-1",
         }
-        token = jwt.encode(payload, "key", algorithm="HS256")
+        token = jwt.encode(payload, "key-for-testing-32bytes-minimum-length!!!", algorithm="HS256")
         with pytest.raises(TokenValidationError, match="not allowed"):
             auth.validate_token(token)
 
@@ -298,6 +298,6 @@ class TestAuthManager:
             "aud": "fleet",
             "sub": "user-1",
         }
-        token = jwt.encode(payload, "some-key", algorithm="HS256")
+        token = jwt.encode(payload, "some-secret-key-for-testing-32bytes!!!", algorithm="HS256")
         with pytest.raises(TokenValidationError, match="No secret key"):
             auth.validate_token(token)

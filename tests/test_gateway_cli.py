@@ -142,10 +142,10 @@ def test_setup_logging_verbose():
 
 def test_create_auth_manager_with_secret():
     from gateway.cli import create_auth_manager, parse_args
-    args = parse_args(["--jwt-secret", "test-secret"])
+    args = parse_args(["--jwt-secret", "test-secret-key-for-testing-32bytes!"])
     auth_manager = create_auth_manager(args)
     assert auth_manager is not None
-    assert auth_manager.secret_key == "test-secret"
+    assert auth_manager.secret_key == "test-secret-key-for-testing-32bytes!"
 
 
 def test_create_auth_manager_with_jwks():
@@ -158,14 +158,14 @@ def test_create_auth_manager_with_jwks():
 
 def test_create_auth_manager_with_issuer():
     from gateway.cli import create_auth_manager, parse_args
-    args = parse_args(["--jwt-secret", "secret", "--issuer", "https://keycloak.example.com"])
+    args = parse_args(["--jwt-secret", "secret-key-for-testing-32bytes!!!", "--issuer", "https://keycloak.example.com"])
     auth_manager = create_auth_manager(args)
     assert auth_manager.issuer == "https://keycloak.example.com"
 
 
 def test_create_auth_manager_with_audience():
     from gateway.cli import create_auth_manager, parse_args
-    args = parse_args(["--jwt-secret", "secret", "--audience", "fleet-api"])
+    args = parse_args(["--jwt-secret", "secret-key-for-testing-32bytes!!!", "--audience", "fleet-api"])
     auth_manager = create_auth_manager(args)
     assert auth_manager.audience == "fleet-api"
 
