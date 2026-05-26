@@ -45,25 +45,33 @@ client = [
     "grpcio>=1.60.0",
     "protobuf>=4.25.0",
 ]
+ui = [
+    "grpcio>=1.60.0",
+    "protobuf>=4.25.0",
+    "aiohttp>=3.9.0",
+]
 dev = [
     "grpcio-tools>=1.60.0",
     "mypy>=1.8.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "aiohttp>=3.9.0",
 ]
 
 [project.scripts]
 headless-server = "linuxcnc_fleet.cli:main"
 fleet-gateway = "gateway.cli:main"
+fleet-ui = "fleet_ui.server:main"
 
 [tool.setuptools.packages.find]
-include = ["linuxcnc_fleet*", "gateway*", "fleet_client*"]
+include = ["linuxcnc_fleet*", "gateway*", "fleet_client*", "fleet_ui*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
 "linuxcnc_fleet" = ["*.py", "fleet_pb2.py", "fleet_pb2_grpc.py"]
 gateway = ["*.py"]
 fleet_client = ["*.py"]
+fleet_ui = ["*.py"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "__pycache__/*", "*.egg-info/*"]
