@@ -264,6 +264,17 @@ rpc BroadcastCommand(BroadcastRequest) returns (BroadcastResult);
 rpc SubscribeAllStatus(SubscribeAllRequest) returns (stream MachineStatus);
 ```
 
+#### Additional Messages
+
+`HomeAxisRequest` was added after initial design:
+
+```protobuf
+message HomeAxisRequest {
+  MachineId id = 1;
+  TrajAxis axis = 2;
+}
+```
+
 #### Request/Response Messages
 
 ```protobuf
@@ -433,25 +444,32 @@ class LinuxCncSidecar:
 
 | linuxcnc.stat.state value | MachineState enum |
 |---|---|
-| `linuxcnc.RCS_IDLE` (1) | IDLE / AUTO_DONE depending on execution |
-| `linuxcnc.RCS_RUNNING` (3) | RUNNING |
-| `linuxcnc.RCS_COMPLETED` (4) | AUTO_DONE |
-| Combined with `execution` field for precise state |
+| `linuxcnc.RCS_IDLE` | OFF (distinguished by execution field) |
+| `linuxcnc.RCS_RUNNING` | RUNNING |
+| `linuxcnc.RCS_DONE` | AUTO_DONE |
 
-| linuxcnc.stat.execution value | ExecutionState enum |
+| linuxcnc.stat.execution value | ExecutionState enum (proto name) |
 |---|---|
-| `linuxcnc.EXEC_STATE_IDLE` (0) | IDLE |
-| `linuxcnc.EXEC_STATE_RUN` (1) | RUN |
-| `linuxcnc.EXEC_STATE_FAST_RUN` (2) | FAST_RUN |
-| `linuxcnc.EXEC_STATE_STEP` (3) | STEP |
-| `linuxcnc.EXEC_STATE_RETRACT` (4) | RETRACT |
-| `linuxcnc.EXEC_STATE_MDA` (5) | MDA |
+| `linuxcnc.EXEC_STATE_IDLE` | EXEC_IDLE (proto: `EXEC_IDLE = 0`, not `IDLE`) |
+| `linuxcnc.EXEC_STATE_RUN` | RUN |
+| `linuxcnc.EXEC_STATE_FAST_RUN` | FAST_RUN |
+| `linuxcnc.EXEC_STATE_STEP` | STEP |
+| `linuxcnc.EXEC_STATE_RETRACT` | RETRACT |
+| `linuxcnc.EXEC_STATE_MDA` | MDA |
+
+| linuxcnc.stat.interp_state value | InterpState enum (proto name) |
+|---|---|
+| `linuxcnc.INTERP_IDLE` | INTERP_IDLE (proto: `INTERP_IDLE = 0`, not `IDLE`) |
+| `linuxcnc.INTERP_READ` | READ |
+| `linuxcnc.INTERP_EXEC` | EXECUTE |
 
 | linuxcnc.stat.mode value | Mode enum |
 |---|---|
-| `linuxcnc.MODE_MANUAL` (1) | MANUAL |
-| `linuxcnc.MODE_AUTO` (2) | AUTO |
-| `linuxcnc.MODE_MDI` (3) | MDA |
+| `linuxcnc.MODE_MANUAL` (1) | MODE_MANUAL |
+| `linuxcnc.MODE_AUTO` (2) | MODE_AUTO |
+| `linuxcnc.MODE_MDI` (3) | MODE_MDA (proto uses MDA, not MDI) |
+
+Note: Mode mapping converts `linuxcnc.MODE_MDI` → `MODE_MDA` because the proto enum is named `MODE_MDA`.
 
 ### Thread Safety
 
@@ -475,10 +493,12 @@ class FleetServiceServicer(fleet_pb2_grpc.FleetServiceServicer):
         status = self.sidecar.get_status()
         return status
 
-    async def SubscribeStatus(self, request, context):
+    def SubscribeStatus(self, request, context):
+        # NOTE: gRPC server-streaming requires regular generators (not async generators)
+        import time as _time
         while True:
             yield self.sidecar.get_status()
-            await asyncio.sleep(0.02)
+            _time.sleep(0.02)
 
     async def SetMode(self, request, context):
         return self.sidecar.set_mode(request.mode)
@@ -503,22 +523,46 @@ class FleetServiceServicer(fleet_pb2_grpc.FleetServiceServicer):
 
 ```python
 def create_server(sidecar: LinuxCncSidecar, port: int = 50051,
-                  cert_file: str = None, key_file: str = None):
-    server = grpc.server(futures_executor=ThreadPoolExecutor(max_workers=8))
+                  cert_file: str = None, key_file: str = None,
+                  root_cert_file: str = None, user_extractor=None):
+    # grpcio 1.80.0 removed futures_executor= kwarg; use positional arg + interceptors=
+    interceptors = []
+    if user_extractor:
+        from linuxcnc_fleet.auth import create_auth_interceptor
+        interceptors.append(create_auth_interceptor(user_extractor))
+
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=8),
+        interceptors=interceptors,
+    )
     fleet_pb2_grpc.add_FleetServiceServicer_to_server(
-        FleetServiceServicer(sidecar), server)
+        FleetServiceRPC(sidecar), server)
 
     if cert_file and key_file:
-        # mTLS setup with root_certificates, private_key, certificate_chain
-        creds = grpc.ssl_channel_credentials(
-            root_certificates=open(cert_file).read(),
-            private_key=open(key_file).read(),
-            certificate_chain=open(cert_file).read())
+        creds = _build_credentials(cert_file, key_file, root_cert_file)
         server.add_secure_port(f'[::]:{port}', creds)
     else:
         server.add_insecure_port(f'[::]:{port}')
 
     return server
+
+
+def _build_credentials(cert_file, key_file, root_cert_file=None):
+    # mTLS if root_cert_file provided, otherwise plain TLS
+    with open(cert_file, "rb") as f:
+        cert = f.read()
+    with open(key_file, "rb") as f:
+        private_key = f.read()
+    if root_cert_file:
+        with open(root_cert_file, "rb") as f:
+            root_certs = f.read()
+        return grpc.ssl_server_credentials(
+            [(private_key, cert)],
+            root_certificates=root_certs,
+            require_client_auth=True,
+        )
+    else:
+        return grpc.ssl_server_credentials([(private_key, cert)])
 ```
 
 ### systemd Service Template
@@ -563,68 +607,117 @@ Central service that handles authentication, authorization, and routing.
 
 ### Registration Protocol
 
-Each sidecar registers on startup:
+Machines are registered with the gateway via the `MachineRegistry` API. In production, a sidecar agent would call `registry.register()` on startup and send heartbeats periodically (default TTL 30s). The registry runs a background cleanup thread that removes expired entries.
 
 ```python
-# In headless server startup:
-async def register_with_gateway(gateway_addr, machine_info):
-    # gRPC call to GatewayService.RegisterMachine
-    # Sidecar sends its MachineInfo + capabilities
-    # Gateway stores in registry with TTL (heartbeat every 10s)
+# Example registration (called by sidecar or external orchestrator):
+registry.register(
+    machine_id="lathe-01",
+    address="192.168.1.10",
+    port=50051,
+    facility="shop-floor-1",
+    tags=["cnc", "lathe"],
+)
+
+# Heartbeat (sidecar calls periodically, e.g., every 10s):
+registry.heartbeat("lathe-01")
+
+# TTL-based expiry: entries older than heartbeat_ttl are removed by background cleanup
 ```
 
 ### Authorization Model
 
-| Role | Can Read Status | Can Control Machine | Can Write HAL Pins | Can Load Programs | Scope |
-|---|---|---|---|---|---|
-| `viewer` | All assigned machines | No | No | No | Facility |
-| `operator` | All assigned machines | Start/Stop/Hold/Home | Output pins only | No | Facility |
-| `programmer` | All assigned machines | MDI/Step/Load | No | Yes | Facility |
-| `maintainer` | All assigned machines | All controls | All pins | Yes | Machine-level |
-| `admin` | All | All | All | All | Global |
+| Role | Read Status | HAL Read | HAL Write | Control (Start/Stop/Home) | Mode Change | Step/MDI | Load Program | Execution Control | Scope |
+|---|---|---|---|---|---|---|---|---|---|
+| `viewer` | Yes | Yes | No | No | No | No | No | No | Facility |
+| `operator` | Yes | Yes | Yes | Yes | Yes | No | No | No | Facility |
+| `programmer` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Facility |
+| `maintainer` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Facility |
+| `admin` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Global (no scope) |
 
 Attributes for scoping:
-- `facility`: e.g., "shop-floor-1", "lab"
+- `facility`: e.g., "shop-floor-1", "lab" — restricts access to machines in the same facility
 - `role`: one of the above
-- `machine_tags`: e.g., ["cnc-mill", "legacy"]
+- `machine_tags`: e.g., ["cnc-mill", "legacy"] — used in policy evaluation
+
+Role hierarchy (each role inherits all permissions from roles below it):
+`viewer` → `operator` → `programmer` → `maintainer` → `admin`
+
+Admin users bypass all facility/tag scoping restrictions.
 
 ### Gateway Service Implementation
 
+The gateway uses a `GatewayServiceServicer` that integrates with the auth manager, policy engine, and machine registry. Each RPC validates OIDC tokens, checks RBAC policies, and routes to the correct instance.
+
 ```python
-class GatewayServiceServicer(gateway_pb2_grpc.FleetGatewayServiceServicer):
-    def __init__(self, auth_manager: AuthManager, registry: MachineRegistry):
+class GatewayServiceServicer(FleetGatewayServiceServicer):
+    def __init__(self, auth_manager: AuthManager, policy_engine: PolicyEngine, registry: MachineRegistry):
         self.auth = auth_manager
+        self.policies = policy_engine
         self.registry = registry
+        self._client_cache: dict[str, _GrpcClient] = {}  # per-machine gRPC channel cache
 
-    async def DiscoverMachines(self, request, context):
-        user = self.auth.get_user(context)
-        facility = request.facility or user.attributes.get('facility')
-        machines = self.registry.list_by_facility(facility)
-        # Filter by user's authorized machines
-        return MachineList(machines=authorized_machines)
+    def DiscoverMachines(self, request, context):
+        user = self.auth.extract_user(context.invocation_metadata())
+        facility = request.facility or user.facility
+        machines = self.registry.list_all()
+        # Filter by user's authorized machines based on scope
+        authorized = [m for m in machines if self._check_access(user, m)]
+        return MachineList(machines=authorized)
 
-    async def RouteMachine(self, request, context):
-        user = self.auth.get_user(context)
+    def RouteMachine(self, request, context):
+        user = self.auth.extract_user(context.invocation_metadata())
         machine_id = request.id.id
-        if not self.auth.can_access(user, machine_id):
-            context.abort(grpc.StatusCode.PERMISSION_DENIED, 'Not authorized')
-        route = self.registry.lookup(machine_id)
-        return GatewayRoute(address=route.address, port=route.port)
+        result = self.policies.can_read_status(user.role)
+        if not result.allowed:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, result.reason)
+        entry = self.registry.lookup(machine_id)
+        if entry is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, f'Machine {machine_id} not found')
+        return GatewayRoute(instance_address=entry.address, instance_port=entry.port)
 
-    async def BroadcastCommand(self, request, context):
-        user = self.auth.get_user(context)
-        # Resolve target machines based on scope/facility/tags
-        targets = self.registry.resolve_scope(request.scope, ...)
-        if not self.auth.can_control(user, [m.id for m in targets]):
-            context.abort(grpc.StatusCode.PERMISSION_DENIED, 'Not authorized')
+    def BroadcastCommand(self, request, context):
+        user = self.auth.extract_user(context.invocation_metadata())
+        # Resolve target machines based on scope (ALL/FACILITY/TAG)
+        targets = self.registry.resolve_scope(request.scope, facility=request.facility, tags=request.tags)
+        if not targets:
+            return BroadcastResult(results={})
 
-        # Fan-out to each instance via FleetService RPCs
+        # Check broadcast authorization per command type
+        cmd_type = 'mdi' if request.HasField('mdi') else 'execution' if request.HasField('exec') else 'mode'
+        result = self.policies.check_broadcast_authorization(user.role, cmd_type)
+        if not result.allowed:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, result.reason)
+
+        # Fan-out to each instance via FleetService RPCs (synchronous per-machine calls)
         results = {}
         for target in targets:
-            result = await call_fleet_service(target, request.command)
-            results[target.id] = result
+            client = self._get_or_create_client(target)
+            with client.connect() as channel:
+                stub = FleetServiceStub(channel)
+                if request.HasField('mdi'):
+                    resp = stub.SendMdiCommand(MdiCommand(id=MachineId(id=target.id), command=request.mdi.command))
+                    results[target.id] = Result(success=resp.success, message=resp.message, error_code=resp.error_code)
+                # ... similar for exec/mode commands
         return BroadcastResult(results=results)
+
+    def SubscribeAllStatus(self, request, context):
+        user = self.auth.extract_user(context.invocation_metadata())
+        if not self.policies.can_subscribe(user.role).allowed:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, 'Not authorized to subscribe')
+
+        # Resolve target machines and stream status from each in background threads
+        targets = self.registry.resolve_scope(request.scope, facility=request.facility)
+        # For each machine, create a background thread that subscribes to SubscribeStatus
+        # Interleave results into the server-streaming response
 ```
+
+Key implementation details:
+- `_GrpcClient.connect()` returns a lazily-created `grpc.insecure_channel`; channels are cached and reused (no context manager)
+- Broadcast fan-out is synchronous per-machine — each target gets its own gRPC stub call via `_execute_broadcast_command()`
+- `SubscribeAllStatus` uses background daemon threads to subscribe to each machine's `SubscribeStatus`, collecting results via `queue.Queue` into a shared dict
+- `context.is_active()` check in the main streaming loop prevents hanging on client disconnect
+- Per-machine access checks (`_check_control_access`) are performed before fan-out, with denied machines getting `Result(success=False)` entries
 
 ### Auth Flow (Central UI -> Gateway -> Instance)
 
@@ -646,80 +739,100 @@ For mTLS between gateway and instances:
 
 ---
 
-## Central Client Library (`fleet_client.py`)
+## Central Client Library (`fleet_client/client.py`)
 
-Python library for the central UI to interact with the fleet.
+Python library for the central UI to interact with the fleet. Lowercased method names (Python convention).
 
 ```python
 class FleetClient:
-    """High-level client for the fleet management API."""
+    """High-level async client for the LinuxCNC fleet management API."""
 
-    def __init__(self, gateway_address: str, token: str):
-        self.gateway_channel = grpc.secure_channel(
-            gateway_address, creds)  # TLS with OIDC auth
-        self.stub = fleet_gateway_pb2_grpc.FleetGatewayServiceStub(self.gateway_channel)
-        self._machine_channels = {}  # cached per-machine channels
+    def __init__(
+        self,
+        gateway_address: str,
+        token: str,
+        tls_enabled: bool = False,
+        machine_channel_ttl: float = 300.0,
+        _gateway_stub=None,       # test injection
+        _fleet_stub_factory=None, # test injection
+        _gateway_channel=None,    # test injection
+    ):
+        self._gateway_address = gateway_address
+        self._token = token
+        self._tls_enabled = tls_enabled
+        self._machine_channel_ttl = machine_channel_ttl
 
-    async def get_machines(self, facility: str = None) -> List[MachineInfo]:
-        """Discover available machines."""
-        resp = await self.stub.DiscoverMachines(
-            DiscoverRequest(facility=facility))
-        return resp.machines
+        # Gateway channel with OIDC auth interceptor
+        auth_interceptor = create_auth_interceptor(self._token)
+        if self._tls_enabled:
+            creds = grpc.ssl_channel_credentials()
+            self._gateway_channel = grpc.intercept_channel(
+                grpc.secure_channel(gateway_address, creds),
+                auth_interceptor,
+            )
+        else:
+            self._gateway_channel = grpc.intercept_channel(
+                grpc.insecure_channel(gateway_address),
+                auth_interceptor,
+            )
+        self._gateway_stub = grpc.aio.FleetGatewayServiceStub(self._gateway_channel)
+        self._machine_channels: dict[str, _CachedChannel] = {}
+        self._cache_lock = threading.Lock()
+
+    async def get_machines(self, facility: str = None) -> list[MachineEntry]:
+        """Discover available machines. Returns MachineEntry dataclass (not raw protobuf)."""
+        ...
 
     async def get_status(self, machine_id: str) -> MachineStatus:
-        """Get current status of a specific machine."""
-        route = await self.stub.RouteMachine(MachineId(id=machine_id))
-        channel = self._get_machine_channel(route)
-        stub = fleet_pb2_grpc.FleetServiceStub(channel)
+        """Get current status with retry for read-only RPCs."""
+        route = await self.route_machine(machine_id)
+        channel = await self._get_or_create_machine_channel(*route)
+        stub = self._fleet_stub_factory(channel)
         return await stub.GetStatus(MachineId(id=machine_id))
 
-    async def stream_status(self, machine_id: str):
-        """Subscribe to real-time status updates."""
-        route = await self.stub.RouteMachine(MachineId(id=machine_id))
-        channel = self._get_machine_channel(route)
-        stub = fleet_pb2_grpc.FleetServiceStub(channel)
+    async def subscribe_status(self, machine_id: str):
+        """Async generator — stream status updates for a single machine."""
+        stub, _, _ = await self._get_fleet_stub(machine_id)
         async for status in stub.SubscribeStatus(MachineId(id=machine_id)):
             yield status
 
-    async def send_mdi(self, machine_id: str, command: str):
+    async def send_mdi(self, machine_id: str, command: str) -> Result:
         """Send MDI command to a machine."""
-        route = await self.stub.RouteMachine(MachineId(id=machine_id))
-        channel = self._get_machine_channel(route)
-        stub = fleet_pb2_grpc.FleetServiceStub(channel)
-        return await stub.SendMdiCommand(MdiCommand(
-            id=MachineId(id=machine_id), command=command))
+        ...
 
-    async def read_hal_pin(self, machine_id: str, pin_name: str):
-        """Read a HAL pin value."""
-        route = await self.stub.RouteMachine(MachineId(id=machine_id))
-        channel = self._get_machine_channel(route)
-        stub = fleet_pb2_grpc.FleetServiceStub(channel)
-        return await stub.ReadHalPin(HalPinRead(
-            id=MachineId(id=machine_id), pin_name=pin_name))
+    async def broadcast_command(self, scope, command_type, command_value, facility=None, tags=None):
+        """Generic broadcast wrapper — builds BroadcastRequest from params.
+        
+        Args:
+            scope: "ALL", "FACILITY", or "TAG"
+            command_type: "mdi", "execution", or "mode"
+            command_value: Command-specific value (string for MDI, int for execution/mode)
+        """
+        ...
 
-    async def write_hal_pin(self, machine_id: str, pin_name: str, value):
-        """Write a HAL pin value."""
-        route = await self.stub.RouteMachine(MachineId(id=machine_id))
-        channel = self._get_machine_channel(route)
-        stub = fleet_pb2_grpc.FleetServiceStub(channel)
-        return await stub.WriteHalPin(HalPinWrite(
-            id=MachineId(id=machine_id), pin_name=pin_name, ...))
+    async def broadcast_mdi(self, scope, command, facility=None, tags=None):
+        """Convenience wrapper around broadcast_command(command_type='mdi', ...)"""
+        ...
 
-    async def broadcast_mdi(self, scope, facility=None, tags=None, command: str):
-        """Send MDI to all matching machines."""
-        return await self.stub.BroadcastCommand(BroadcastRequest(
-            scope=scope, facility=facility, tags=tags,
-            mdi=MdiCommand(id=MachineId(id='*'), command=command)))
+    async def route_machine(self, machine_id: str) -> tuple[str, int]:
+        """Resolve machine ID to (address, port) via gateway."""
+        ...
 
-    def _get_machine_channel(self, route: GatewayRoute) -> grpc.Channel:
-        """Get or create cached channel to a machine instance."""
-        key = f"{route.address}:{route.instance_port}"
-        if key not in self._machine_channels:
-            # mTLS channel to instance (gateway cert + key)
-            self._machine_channels[key] = grpc.secure_channel(
-                f"{route.address}:{route.instance_port}", instance_creds)
-        return self._machine_channels[key]
+    async def _get_or_create_machine_channel(self, address: str, port: int) -> grpc.Channel:
+        """Get or create cached gRPC channel to a machine instance.
+        
+        NOTE: Currently creates insecure channels even when tls_enabled=True
+        (bug — should use grpc.secure_channel when tls_enabled).
+        """
+        ...
 ```
+
+Key implementation details:
+- `_CachedChannel` wraps `grpc.Channel` with TTL tracking (`created_at`, `last_used`, `ref_count`)
+- Background cleanup runs on next gateway RPC call (lazy), not a dedicated timer thread
+- Retry only for read-only RPCs in `_READ_ONLY_RPC` set: GetStatus, SubscribeStatus, ListHalComponents, ReadHalPin, GetErrors, SubscribeErrors, GetMachineInfo, GetPosition, GetIniParam
+- `_retry_read()` accepts coroutine factory callable (not pre-created coroutine) — avoids stale coroutine bug
+- Test injection via `_gateway_stub`, `_fleet_stub_factory`, `_gateway_channel` constructor params
 
 ---
 
@@ -731,20 +844,37 @@ linuxcnc-fleet/
 │   └── fleet.proto              # gRPC service definition (all RPCs + messages)
 ├── linuxcnc_fleet/
 │   ├── __init__.py
-│   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module
-│   ├── server.py                # gRPC server per instance
-│   └── cli.py                   # CLI entry point: headless-server --ini ...
+│   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module (699 lines)
+│   ├── server.py                # gRPC server per instance + FleetServiceRPC (405 lines)
+│   ├── cli.py                   # CLI entry point: headless-server --ini ...
+│   └── auth.py                  # mTLS/OIDC interceptor for FleetService (~120 lines)
 ├── gateway/
 │   ├── __init__.py
-│   ├── server.py                # FleetGatewayService implementation
-│   ├── auth.py                  # OIDC token validation + user extraction
-│   ├── policies.py              # RBAC policy engine
-│   └── registry.py              # Machine registration + discovery store
+│   ├── server.py                # FleetGatewayService implementation (408 lines)
+│   ├── auth.py                  # OIDC token validation + user extraction (228 lines)
+│   ├── policies.py              # RBAC policy engine (303 lines)
+│   └── registry.py              # Machine registration + discovery store (206 lines)
+│   └── cli.py                   # Gateway CLI entry point: fleet-gateway (139 lines)
 ├── fleet_client/
 │   ├── __init__.py
-│   └── client.py                # FleetClient high-level library
+│   ├── client.py                # FleetClient high-level library (1057 lines)
+│   └── auth.py                  # OIDC bearer auth interceptor (~60 lines)
+├── tests/
+│   ├── conftest.py              # Shared mock fixtures (linuxcnc, _hal, gRPC servers)
+│   ├── test_state_mapping.py    # Phase 1: state mapping correctness (26 tests)
+│   ├── test_snapshot.py         # Phase 1: snapshot immutability (7 tests)
+│   ├── test_sidecar.py          # Phase 1: control command error paths (22 tests)
+│   ├── test_cli.py              # Phase 1: CLI argument parsing (18 tests)
+│   ├── test_auth.py             # Phase 2: OIDC token parsing + expiration (31 tests)
+│   ├── test_policies.py         # Phase 2: RBAC policy evaluation (62 tests)
+│   ├── test_registry.py         # Phase 2: machine registry CRUD + TTL expiry (41 tests)
+│   ├── test_gateway.py          # Phase 2: broadcast fan-out (35 tests)
+│   ├── test_gateway_cli.py      # Phase 2: gateway CLI parsing (20 tests)
+│   ├── test_interceptor.py      # Phase 2: OIDC interceptor behavior (19 tests)
+│   ├── test_fleet_client.py     # Phase 3: FleetClient routing, streaming, retry (46 tests)
+│   └── test_integration.py      # Phase 4: full flow integration (17 tests)
 ├── scripts/
-│   └── linuxcnc-fleet.service   # systemd service template
+│   └── linuxcnc-fleet.service   # systemd service template (deferred)
 ├── certs/                       # TLS certificates (git-ignored)
 │   ├── ca.pem
 │   ├── server.pem
@@ -752,6 +882,8 @@ linuxcnc-fleet/
 ├── pyproject.toml               # Package definition + dependencies
 └── Makefile                     # Build: proto generation, install
 ```
+
+Note: `linuxcnc_fleet/auth.py` contains the mTLS interceptor for FleetService RPCs (separate from `gateway/auth.py` which handles OIDC for the gateway). The interceptor uses a callable-based `user_extractor` to decouple from specific AuthManager implementations.
 
 ---
 
@@ -766,9 +898,9 @@ linuxcnc-fleet/
 ### Gateway (`gateway/`)
 - `grpcio`, `grpcio-tools`
 - `protobuf`
-- `PyJWT` or `jose` (OIDC token validation)
-- `aiohttp` or `fastapi` (optional: HTTP health/metrics endpoint)
-- Redis or in-memory dict (machine registry store)
+- `PyJWT` (OIDC token validation — HS256 + RS256 via JWKS)
+- `cryptography` (JWK to PEM conversion for RS256 key validation)
+- In-memory dict with threading lock (machine registry store)
 
 ### Client (`fleet_client/`)
 - `grpcio`, `protobuf`
@@ -804,12 +936,26 @@ sudo systemctl start linuxcnc-fleet@machine1
 ### Central (Gateway + UI)
 
 ```bash
-# 1. Run gateway
-linuxcnc-gateway --listen :50050 \
-    --oidc-issuer https://keycloak.example.com/realms/linuxcnc \
-    --oidc-client-id fleet-ui \
+# 1. Run gateway (uses HS256 secret for dev, JWKS URL for production)
+fleet-gateway --port 50050 \
+    --jwt-secret "your-32-byte-minimum-secret-key-here!!" \
+    --issuer https://keycloak.example.com/realms/linuxcnc \
+    --audience fleet-api
+
+# For RS256 with JWKS:
+fleet-gateway --port 50050 \
+    --jwks-url https://keycloak.example.com/realms/linuxcnc/protocol/openid-connect/certs \
+    --issuer https://keycloak.example.com/realms/linuxcnc \
+    --audience fleet-api
+
+# With mTLS (require client certs from instances):
+fleet-gateway --port 50050 \
+    --jwt-secret "your-32-byte-minimum-secret-key-here!!" \
+    --issuer https://keycloak.example.com/realms/linuxcnc \
+    --audience fleet-api \
     --cert /etc/linuxcnc-fleet/gateway.pem \
-    --key /etc/linuxcnc-fleet/gateway-key.pem
+    --key /etc/linuxcnc-fleet/gateway-key.pem \
+    --root-cert /etc/linuxcnc-fleet/ca.pem
 
 # 2. Run central UI (separate process)
 python -m fleet_ui --gateway localhost:50050
@@ -894,7 +1040,7 @@ python -m fleet_ui --gateway localhost:50050
 - [x] Unit tests: broadcast fan-out with per-result tracking (35 tests, `test_gateway.py`)
 - [x] Unit tests: gateway CLI parsing and TLS validation (20 tests, `test_gateway_cli.py`)
 - [x] Unit tests: OIDC interceptor behavior (19 tests, `test_interceptor.py`)
-- **Total: 208/208 tests passing**
+- **Cumulative: 281/281 tests passing** (73 Phase 1 + 208 Phase 2)
 
 ### Phase 3: Client Library & UI Integration (Week 5-6)
 - [x] Implement `FleetClient` high-level library (`fleet_client/client.py`, ~1000 lines)
@@ -912,17 +1058,22 @@ python -m fleet_ui --gateway localhost:50050
 - [x] Unit tests: fleet service wrappers (17 tests, `test_fleet_client.py` — includes home_axis, load_program)
 - [x] Unit tests: TLS channel creation (2 tests, `test_fleet_client.py`)
 - [x] Unit tests: async context manager (2 tests, `test_fleet_client.py`)
-- **Total: 327/327 tests passing**
+- **Cumulative: 327/327 tests passing** (281 + 46 FleetClient)
 
-### Phase 4: Hardening & Packaging (Week 7-8)
-- [ ] Central UI integration tests against gateway + sidecar
+### Phase 4: Hardening & Packaging (Week 7-8) ✅ COMPLETE (Integration Tests)
+- [x] Integration tests: full flow — FleetClient → Gateway → Sidecar → linuxcnc.stat (17 tests, `test_integration.py`)
+  - [x] `TestDiscoverRouteGetStatus`: discover, route, get_status_via_gateway, viewer_can_discover (4 tests)
+  - [x] `TestBroadcastCommand`: broadcast_mdi_to_all, broadcast_mode_change (2 tests)
+  - [x] `TestStreamingStatus`: subscribe_all_status (1 test)
+  - [x] `TestSidecarDirectCommands`: set_mode, home_axis, send_mdi_command, load_program, subscribe_status_stream, get_errors (6 tests)
+  - [x] `TestGatewayAuthIntegration`: unauthenticated_request_rejected, viewer_cannot_broadcast (2 tests)
+  - [x] `TestRegistryHeartbeat`: heartbeat_updates_last_seen, expired_machine_removed (2 tests)
+- **Cumulative: 344/344 tests passing** (327 + 17 Integration)
+- All integration tests use real gRPC servers (not stubs) to exercise serialization, channel setup, auth interceptor chaining, broadcast fan-out
 - [ ] Load testing: concurrent connections, broadcast performance
 - [ ] Package distribution (pip wheel)
 - [ ] Certificate auto-renewal support
 - [ ] Metrics/health endpoints (Prometheus / HTTP)
-- [ ] Integration tests: full flow — UI → gateway → sidecar → linuxcnc.stat
-- [ ] Integration tests: TLS/mTLS handshake verification
-- [ ] Integration tests: broadcast to multiple instances with mixed results
 
 ---
 
