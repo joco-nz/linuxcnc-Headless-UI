@@ -1,5 +1,11 @@
 # AGENTS.md — linuxcnc-Headless-UI
 
+## Rules
+
+- NEVER update, modify. or rewrite the PRD document.
+
+- The PRD is read-only. Treat all requirements in PRD.md as fixed constraints.
+
 ## Current State
 
 **Phase 1: Core Sidecar is complete.** The sidecar component (proto, LinuxCncSidecar, gRPC server, CLI) is implemented with 73/73 unit tests passing.
@@ -14,12 +20,13 @@
 
 ## Phase 3 Deliverables
 
-| Component | Files | Tests | Status |
-|-----------|-------|-------|--------|
-| Auth interceptor | `fleet_client/auth.py` (76 lines) | — | ✅ |
-| FleetClient | `fleet_client/client.py` (1058 lines) | 46 (test_fleet_client.py) | ✅ |
+| Component        | Files                                 | Tests                     | Status |
+| ---------------- | ------------------------------------- | ------------------------- | ------ |
+| Auth interceptor | `fleet_client/auth.py` (76 lines)     | —                         | ✅      |
+| FleetClient      | `fleet_client/client.py` (1058 lines) | 46 (test_fleet_client.py) | ✅      |
 
 ### Key implementation notes
+
 - Async-only FleetClient with automatic OIDC token injection via gRPC interceptor
 - Machine channel caching with TTL expiry (default 300s) and thread-safe cleanup
 - Retry only for read-only RPCs (exponential backoff, 3 retries max) — catches UNAVAILABLE/DEADLINE_EXCEEDED/RESOURCE_EXHAUSTED
@@ -29,11 +36,12 @@
 
 ## Phase 4 Deliverables
 
-| Component | Files | Tests | Status |
-|-----------|-------|-------|--------|
-| Integration tests | `tests/test_integration.py` (589 lines) | 17 | ✅ |
+| Component         | Files                                   | Tests | Status |
+| ----------------- | --------------------------------------- | ----- | ------ |
+| Integration tests | `tests/test_integration.py` (589 lines) | 17    | ✅      |
 
 ### Test classes
+
 - `TestDiscoverRouteGetStatus`: discover, route, get_status_via_gateway, viewer_can_discover (4 tests)
 - `TestBroadcastCommand`: broadcast_mdi_to_all, broadcast_mode_change (2 tests)
 - `TestStreamingStatus`: subscribe_all_status (1 test)
@@ -42,6 +50,7 @@
 - `TestRegistryHeartbeat`: heartbeat_updates_last_seen, expired_machine_removed (2 tests)
 
 ### Key implementation notes
+
 - Integration tests use real gRPC servers (not stubs) to exercise serialization, channel setup, auth interceptor chaining, broadcast fan-out
 - Fixture chain: `sidecar_server` → `gateway_server` → `multi_gateway_server` with proper teardown via stop functions
 - Fixed bugs discovered during integration testing:
@@ -54,15 +63,16 @@
 
 All issues documented in `headless_ui.md` have been resolved:
 
-| # | File | Issue | Status |
-|---|------|-------|--------|
-| 1 | `gateway/server.py` | Type hint `DiscoveryRequest` didn't exist — should be `DiscoverRequest` | ✅ Fixed |
-| 2 | `linuxcnc_fleet/cli.py` | `AuthManager(secret=...)` was wrong — now uses `AuthManager(secret_key=...)` | ✅ Fixed |
-| 3 | `fleet_client/client.py` | `_get_or_create_machine_channel()` created insecure channels when `tls_enabled=True` | ✅ Fixed |
+| #   | File                     | Issue                                                                                | Status  |
+| --- | ------------------------ | ------------------------------------------------------------------------------------ | ------- |
+| 1   | `gateway/server.py`      | Type hint `DiscoveryRequest` didn't exist — should be `DiscoverRequest`              | ✅ Fixed |
+| 2   | `linuxcnc_fleet/cli.py`  | `AuthManager(secret=...)` was wrong — now uses `AuthManager(secret_key=...)`         | ✅ Fixed |
+| 3   | `fleet_client/client.py` | `_get_or_create_machine_channel()` created insecure channels when `tls_enabled=True` | ✅ Fixed |
 
 ## Architecture Source
 
 Read `headless_ui.md` before making any changes. It defines:
+
 - The full gRPC protocol (`fleet.proto` — see the Protocol Definition section)
 - The Python stack: grpcio, protobuf, linuxcnc/_hal modules (already on target machines)
 - Three components: **sidecar** (`linuxcnc_fleet/`), **gateway** (`gateway/`), **client** (`fleet_client/`)
@@ -71,15 +81,16 @@ Read `headless_ui.md` before making any changes. It defines:
 
 ## Phase 1 Deliverables
 
-| Component | Files | Tests | Status |
-|-----------|-------|-------|--------|
-| Proto + stubs | `proto/fleet.proto`, `linuxcnc_fleet/fleet_pb2.py`, `fleet_pb2_grpc.py` | — | ✅ |
-| Sidecar | `linuxcnc_fleet/headless.py` (699 lines) | 26 (test_state_mapping.py) + 7 (test_snapshot.py) + 22 (test_sidecar.py) | ✅ |
-| gRPC server | `linuxcnc_fleet/server.py` (435 lines) | — | ✅ |
-| CLI | `linuxcnc_fleet/cli.py` (148 lines) | 18 (test_cli.py) | ✅ |
-| Test infra | `tests/conftest.py` (mock linuxcnc/_hal via pytest_configure) | | ✅ |
+| Component     | Files                                                                   | Tests                                                                    | Status |
+| ------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------ |
+| Proto + stubs | `proto/fleet.proto`, `linuxcnc_fleet/fleet_pb2.py`, `fleet_pb2_grpc.py` | —                                                                        | ✅      |
+| Sidecar       | `linuxcnc_fleet/headless.py` (699 lines)                                | 26 (test_state_mapping.py) + 7 (test_snapshot.py) + 22 (test_sidecar.py) | ✅      |
+| gRPC server   | `linuxcnc_fleet/server.py` (435 lines)                                  | —                                                                        | ✅      |
+| CLI           | `linuxcnc_fleet/cli.py` (148 lines)                                     | 18 (test_cli.py)                                                         | ✅      |
+| Test infra    | `tests/conftest.py` (mock linuxcnc/_hal via pytest_configure)           |                                                                          | ✅      |
 
 ### Key implementation notes
+
 - `LinuxCncSidecar.shutdown()` stops the polling loop (not `stop()` — that's the execution stop RPC handler)
 - State mapping functions use protobuf enum values directly (no `.value` — they are ints)
 - Proto uses `MODE_MDA`, not `MODE_MDI` (linuxcnc constant is `MODE_MDI`)
@@ -87,18 +98,19 @@ Read `headless_ui.md` before making any changes. It defines:
 
 ## Phase 2 Deliverables
 
-| Component | Files | Tests | Status |
-|-----------|-------|-------|--------|
-| Auth module | `gateway/auth.py` (234 lines) | 31 (test_auth.py) | ✅ |
-| Policy engine | `gateway/policies.py` (303 lines) | 62 (test_policies.py) | ✅ |
-| Registry | `gateway/registry.py` (206 lines) | 41 (test_registry.py) | ✅ |
-| Gateway server | `gateway/server.py` (488 lines) | 35 (test_gateway.py) | ✅ |
-| Gateway CLI | `gateway/cli.py` (144 lines) | 20 (test_gateway_cli.py) | ✅ |
-| mTLS interceptor | `linuxcnc_fleet/auth.py` (146 lines) | 19 (test_interceptor.py) | ✅ |
-| Server auth wiring | `linuxcnc_fleet/server.py` (updated) | — | ✅ |
-| CLI auth wiring | `linuxcnc_fleet/cli.py` (updated) | — | ✅ |
+| Component          | Files                                | Tests                    | Status |
+| ------------------ | ------------------------------------ | ------------------------ | ------ |
+| Auth module        | `gateway/auth.py` (234 lines)        | 31 (test_auth.py)        | ✅      |
+| Policy engine      | `gateway/policies.py` (303 lines)    | 62 (test_policies.py)    | ✅      |
+| Registry           | `gateway/registry.py` (206 lines)    | 41 (test_registry.py)    | ✅      |
+| Gateway server     | `gateway/server.py` (488 lines)      | 35 (test_gateway.py)     | ✅      |
+| Gateway CLI        | `gateway/cli.py` (144 lines)         | 20 (test_gateway_cli.py) | ✅      |
+| mTLS interceptor   | `linuxcnc_fleet/auth.py` (146 lines) | 19 (test_interceptor.py) | ✅      |
+| Server auth wiring | `linuxcnc_fleet/server.py` (updated) | —                        | ✅      |
+| CLI auth wiring    | `linuxcnc_fleet/cli.py` (updated)    | —                        | ✅      |
 
 ### Key implementation notes
+
 - Gateway AuthManager uses `secret_key` parameter (not `secret`) and requires `issuer` + `audience`
 - mTLS interceptor uses callable-based user_extractor (decoupled from specific AuthManager)
 - FleetServiceRPC checks auth context for control/write/admin operations via role hierarchy
@@ -130,10 +142,12 @@ pip install "linuxcnc-fleet[dev]"       # dev tools (pytest, mypy)
 ```
 
 ### Entry points
+
 - `headless-server` → `linuxcnc_fleet.cli:main`
 - `fleet-gateway` → `gateway.cli:main`
 
 ### Proto code generation
+
 ```bash
 python -m grpc_tools.protoc -I. \
     --python_out=linuxcnc_fleet \
