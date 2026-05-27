@@ -379,15 +379,21 @@ class LinuxCncSidecar:
         # Start background polling thread at 50Hz (0.02s interval)
         # Store latest snapshot in thread-safe atomic structure
 
-    def poll(self):
-        """Single poll iteration — called by background thread."""
+    def _poll_loop(self):
+        """Background polling loop — runs in daemon thread."""
+        while self._running:
+            self._build_snapshot()
+            time.sleep(0.02)
+
+    def _build_snapshot(self):
+        """Single poll iteration — extract all fields and create new snapshot object."""
         # stat.poll() -> extract: state, execution, interp_state, estop, mode
         # stat.position -> world + joint positions
         # stat.joint_actual_pos, stat.joint_commanded_pos
         # stat.linear_axis, stat.angular_axis for axis identification
         # command.get_feedrate(), get_spindle_speed()
         # error_channel.poll() for new errors
-        # Update shared snapshot atomically
+        # Create new _Snapshot object and atomically swap reference via object.__setattr__
 
     def get_status(self) -> MachineStatus:
         """Return latest snapshot as protobuf message."""
@@ -435,9 +441,21 @@ class LinuxCncSidecar:
     def get_machine_info(self) -> MachineInfo:
         """Assemble MachineInfo from ini + stat."""
 
+    def start(self) -> Result:
+        """Start execution (command.start())."""
+
+    def home_all(self) -> Result:
+        """Home all axes (command.home() with no axis arg)."""
+
+    def load_program(self, path: str) -> Result:
+        """command.program_open(path)."""
+
+    def step_forward(self) -> Result:
+        """command.step() — single block execution."""
+
     def run(self):
         """Start polling loop (non-blocking)."""
-        # Daemon thread: while True: self.poll(); time.sleep(0.02)
+        # Daemon thread: _poll_loop() with _running flag check
 ```
 
 ### State Mapping (`linuxcnc` -> protobuf enum)
@@ -473,8 +491,8 @@ Note: Mode mapping converts `linuxcnc.MODE_MDI` → `MODE_MDA` because the proto
 
 ### Thread Safety
 
-- Snapshot uses `dataclasses.replace()` for immutability on update.
-- Background thread writes to new snapshot object; reader atomically swaps reference.
+- Snapshot is a `_Snapshot` dataclass — new objects created in `_build_snapshot()`.
+- Background thread creates entirely new snapshot object; reader atomically swaps reference via `object.__setattr__(self, '_snapshot', new_snapshot)`.
 - No locks needed for reads — single-writer, multi-reader atomic reference swap.
 
 ---
@@ -488,35 +506,34 @@ class FleetServiceServicer(fleet_pb2_grpc.FleetServiceServicer):
     def __init__(self, sidecar: LinuxCncSidecar):
         self.sidecar = sidecar
 
-    async def GetStatus(self, request, context):
+    def GetStatus(self, request, context):
         # Validate auth metadata (token from gateway or direct mTLS)
         status = self.sidecar.get_status()
         return status
 
     def SubscribeStatus(self, request, context):
-        # NOTE: gRPC server-streaming requires regular generators (not async generators)
+        # NOTE: gRPC sync server API uses regular generators (not async generators) for streaming
         import time as _time
         while True:
             yield self.sidecar.get_status()
             _time.sleep(0.02)
 
-    async def SetMode(self, request, context):
+    def SetMode(self, request, context):
         return self.sidecar.set_mode(request.mode)
 
-    async def SendMdiCommand(self, request, context):
+    def SendMdiCommand(self, request, context):
         return self.sidecar.send_mdi(request.command)
 
-    # ... other RPCs mapped similarly
+    # ... other RPCs mapped similarly (all sync — no async keyword)
 
-    async def ReadHalPin(self, request, context):
+    def ReadHalPin(self, request, context):
         return self.sidecar.read_hal_pin(request.pin_name)
 
-    async def WriteHalPin(self, request, context):
+    def WriteHalPin(self, request, context):
         return self.sidecar.write_hal_pin(request.pin_name, ...)
 
-    async def SubscribeErrors(self, request, context):
-        # Stream from error_channel in sidecar
-        ...
+    def SubscribeErrors(self, request, context):
+        # Stream from error_channel in sidecar — regular Generator, not AsyncGenerator
 ```
 
 ### Server Startup
@@ -536,7 +553,12 @@ def create_server(sidecar: LinuxCncSidecar, port: int = 50051,
         interceptors=interceptors,
     )
     fleet_pb2_grpc.add_FleetServiceServicer_to_server(
-        FleetServiceRPC(sidecar), server)
+        FleetServiceRPC(sidecar), server)  # FleetServiceRPC wraps FleetServiceServicer with auth context
+
+
+class GatewayServiceRPC:
+    """Stub implementation with placeholder RPCs — full gateway logic in gateway/ package."""
+    # Placeholder for future cross-instance routing within sidecar process
 
     if cert_file and key_file:
         creds = _build_credentials(cert_file, key_file, root_cert_file)
@@ -658,7 +680,7 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
         self._client_cache: dict[str, _GrpcClient] = {}  # per-machine gRPC channel cache
 
     def DiscoverMachines(self, request, context):
-        # NOTE: Type hint should be DiscoverRequest (proto message), not DiscoveryRequest
+        # Type hint: DiscoverRequest (proto message) — fixed from DiscoveryRequest
         user = self.auth.extract_user(context.invocation_metadata())
 
         # Resolve facility from request or user claims separately
@@ -672,6 +694,15 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
         # Narrow by request facility if provided
         if request_facility:
             filtered = [m for m in filtered if m.get('facility') == request_facility]
+
+    def _check_read_access(self, user):
+        """Helper: check if user has read access to machines."""
+    def _check_control_access(self, user, machine_id):
+        """Helper: check if user can control a specific machine."""
+    def _get_or_create_client(self, target):
+        """Helper: get or create cached gRPC client for a target."""
+    def _execute_broadcast_command(self, stub, request_type, request_msg):
+        """Helper: execute single RPC in broadcast fan-out loop."""
 
     def RouteMachine(self, request, context):
         user = self.auth.extract_user(context.invocation_metadata())
@@ -698,6 +729,7 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
             context.abort(grpc.StatusCode.PERMISSION_DENIED, result.reason)
 
         # Fan-out to each instance via FleetService RPCs (synchronous per-machine calls)
+        # Per-machine _check_control_access before fan-out at lines 281-288
         results = {}
         for target in targets:
             client = self._get_or_create_client(target)
@@ -706,7 +738,7 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
                 if request.HasField('mdi'):
                     resp = stub.SendMdiCommand(MdiCommand(id=MachineId(id=target.id), command=request.mdi.command))
                     results[target.id] = Result(success=resp.success, message=resp.message, error_code=resp.error_code)
-                # ... similar for exec/mode commands
+                # ... similar for exec/mode commands via _execute_broadcast_command()
         return BroadcastResult(results=results)
 
     def SubscribeAllStatus(self, request, context):
@@ -787,52 +819,54 @@ class FleetClient:
         self._machine_channels: dict[str, _CachedChannel] = {}
         self._cache_lock = threading.Lock()
 
+    # Gateway RPC wrappers (8 methods)
     async def get_machines(self, facility: str = None) -> list[MachineEntry]:
-        """Discover available machines. Returns MachineEntry dataclass (not raw protobuf)."""
-        ...
-
-    async def get_status(self, machine_id: str) -> MachineStatus:
-        """Get current status with retry for read-only RPCs."""
-        route = await self.route_machine(machine_id)
-        channel = await self._get_or_create_machine_channel(*route)
-        stub = self._fleet_stub_factory(channel)
-        return await stub.GetStatus(MachineId(id=machine_id))
-
-    async def subscribe_status(self, machine_id: str):
-        """Async generator — stream status updates for a single machine."""
-        stub, _, _ = await self._get_fleet_stub(machine_id)
-        async for status in stub.SubscribeStatus(MachineId(id=machine_id)):
-            yield status
-
-    async def send_mdi(self, machine_id: str, command: str) -> Result:
-        """Send MDI command to a machine."""
-        ...
-
-    async def broadcast_command(self, scope, command_type, command_value, facility=None, tags=None):
-        """Generic broadcast wrapper — builds BroadcastRequest from params.
-        
-        Args:
-            scope: "ALL", "FACILITY", or "TAG"
-            command_type: "mdi", "execution", or "mode"
-            command_value: Command-specific value (string for MDI, int for execution/mode)
-        """
-        ...
-
-    async def broadcast_mdi(self, scope, command, facility=None, tags=None):
-        """Convenience wrapper around broadcast_command(command_type='mdi', ...)"""
-        ...
-
+        """Discover available machines. Returns MachineEntry dataclass."""
     async def route_machine(self, machine_id: str) -> tuple[str, int]:
         """Resolve machine ID to (address, port) via gateway."""
-        ...
+    async def broadcast_command(self, scope, command_type, command_value, facility=None, tags=None):
+        """Generic broadcast wrapper — builds BroadcastRequest from params."""
+    async def broadcast_mdi(self, scope, command, facility=None, tags=None):
+        """Convenience wrapper around broadcast_command(command_type='mdi', ...)"""
+    async def broadcast_execution(self, scope, exec_state, facility=None, tags=None):
+        """Convenience wrapper around broadcast_command(command_type='execution', ...)"""
+    async def broadcast_mode(self, scope, mode, facility=None, tags=None):
+        """Convenience wrapper around broadcast_command(command_type='mode', ...)"""
+    async def subscribe_all_status(self, facility: str = None, poll_interval: float = 0.5):
+        """Async generator — stream status from all machines in facility."""
 
+    # FleetService wrappers (21 methods — one per RPC)
+    async def get_status(self, machine_id: str) -> MachineStatus: ...
+    async def set_mode(self, machine_id: str, mode: Mode) -> Result: ...
+    async def set_execution(self, machine_id: str, state: ExecutionState) -> Result: ...
+    async def start(self, machine_id: str) -> Result: ...
+    async def stop(self, machine_id: str) -> Result: ...
+    async def feed_hold(self, machine_id: str) -> Result: ...
+    async def continue_exec(self, machine_id: str) -> Result: ...
+    async def home_all(self, machine_id: str) -> Result: ...
+    async def step_forward(self, machine_id: str) -> Result: ...
+    async def send_mdi(self, machine_id: str, command: str) -> Result: ...
+    async def home_axis(self, machine_id: str, axis: TrajAxis) -> Result: ...
+    async def load_program(self, machine_id: str, path: str) -> Result: ...
+    async def get_position(self, machine_id: str, pos_type: PositionRequest.Type) -> PositionResponse: ...
+    async def list_hal_components(self, machine_id: str) -> HalComponentList: ...
+    async def read_hal_pin(self, machine_id: str, pin_name: str) -> HalPinValue: ...
+    async def write_hal_pin(self, machine_id: str, pin_name: str, ...) -> Result: ...
+    async def get_errors(self, machine_id: str, limit: int = 50) -> ErrorList: ...
+    async def get_machine_info(self, machine_id: str) -> MachineInfo: ...
+    async def get_ini_param(self, machine_id: str, section: str, option: str) -> IniParamValue: ...
+
+    # Streaming subscriptions (3 async generators)
+    async def subscribe_status(self, machine_id: str):
+        """Async generator — stream status updates for a single machine."""
+    async def subscribe_hal_pins(self, machine_id: str, pin_names: list[str], poll_interval: float = 0.5):
+        """Async generator — stream HAL pin value updates."""
+    async def subscribe_errors(self, machine_id: str):
+        """Async generator — stream error events."""
+
+    # Internal methods
     async def _get_or_create_machine_channel(self, address: str, port: int) -> grpc.Channel:
-        """Get or create cached gRPC channel to a machine instance.
-        
-        NOTE: Currently creates insecure channels even when tls_enabled=True
-        (bug — should use grpc.secure_channel when tls_enabled).
-        """
-        ...
+        """Get or create cached gRPC channel to a machine instance."""
 ```
 
 Key implementation details:
@@ -849,24 +883,32 @@ Key implementation details:
 ```
 linuxcnc-fleet/
 ├── proto/
-│   └── fleet.proto              # gRPC service definition (all RPCs + messages)
+│   └── fleet.proto              # gRPC service definition (all RPCs + messages) — 354 lines
 ├── linuxcnc_fleet/
 │   ├── __init__.py
-│   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module (699 lines)
-│   ├── server.py                # gRPC server per instance + FleetServiceRPC (405 lines)
-│   ├── cli.py                   # CLI entry point: headless-server --ini ...
-│   └── auth.py                  # mTLS/OIDC interceptor for FleetService (~120 lines)
+│   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module — 699 lines
+│   ├── server.py                # gRPC server per instance + FleetServiceRPC — 435 lines
+│   ├── cli.py                   # CLI entry point: headless-server --ini ... + OIDC args (--jwt-secret, --jwks-url, --issuer, --audience) — 148 lines
+│   └── auth.py                  # mTLS/OIDC interceptor for FleetService (AuthContext, AuthInterceptor, AuthDecorator) — 146 lines
 ├── gateway/
 │   ├── __init__.py
-│   ├── server.py                # FleetGatewayService implementation (408 lines)
-│   ├── auth.py                  # OIDC token validation + user extraction (228 lines)
-│   ├── policies.py              # RBAC policy engine (303 lines)
-│   └── registry.py              # Machine registration + discovery store (206 lines)
-│   └── cli.py                   # Gateway CLI entry point: fleet-gateway (139 lines)
+│   ├── server.py                # FleetGatewayService implementation + helper methods — 488 lines
+│   ├── auth.py                  # OIDC token validation + user extraction — 234 lines
+│      # AuthManager, User dataclass, extract_user(), validate_token(), _parse_claims()
+│      # create_test_auth_manager(), create_test_token(), clear_jwks_cache()
+│   ├── policies.py              # RBAC policy engine — 303 lines
+│   ├── registry.py              # Machine registration + discovery store — 206 lines
+│   └── cli.py                   # Gateway CLI entry point: fleet-gateway — validate_args() requires auth config — 144 lines
 ├── fleet_client/
 │   ├── __init__.py
-│   ├── client.py                # FleetClient high-level library (1057 lines)
-│   └── auth.py                  # OIDC bearer auth interceptor (~60 lines)
+│   ├── client.py                # FleetClient high-level library (28+ public methods) — 1058 lines
+│      # Gateway RPC wrappers: get_machines, route_machine, broadcast_command/mode/execution/mdi, subscribe_all_status
+│      # FleetService wrappers: all 21 RPCs as async methods + 3 streaming subscriptions
+│      # _CachedChannel with TTL, lazy cleanup, _retry_read(), test injection params
+│   └── auth.py                  # OIDC bearer auth interceptor (BearerAuthInterceptor, _ClientCallDetails) — 76 lines
+├── fleet_ui/                    # Central UI package (not yet implemented)
+│   ├── __init__.py
+│   └── server.py                # fleet-ui entry point (deferred)
 ├── tests/
 │   ├── conftest.py              # Shared mock fixtures (linuxcnc, _hal, gRPC servers)
 │   ├── test_state_mapping.py    # Phase 1: state mapping correctness (26 tests)
@@ -882,16 +924,21 @@ linuxcnc-fleet/
 │   ├── test_fleet_client.py     # Phase 3: FleetClient routing, streaming, retry (46 tests)
 │   └── test_integration.py      # Phase 4: full flow integration (17 tests)
 ├── scripts/
-│   └── linuxcnc-fleet.service   # systemd service template (deferred)
-├── certs/                       # TLS certificates (git-ignored)
-│   ├── ca.pem
-│   ├── server.pem
-│   └── server-key.pem
-├── pyproject.toml               # Package definition + dependencies
-└── Makefile                     # Build: proto generation, install
+│   ├── single-machine.md        # Single machine setup guide (deferred)
+│   ├── verify.py                # Setup verification script (deferred)
+│   └── setup-single-machine.sh  # Automated single machine setup (deferred)
+├── certs/                       # TLS certificates (git-ignored, directory not yet created)
+├── pyproject.toml               # Package definition + dependencies (87 lines, includes fleet-ui entry point + ui extras)
+└── Makefile                     # Build: proto generation, install (not yet created)
 ```
 
 Note: `linuxcnc_fleet/auth.py` contains the mTLS interceptor for FleetService RPCs (separate from `gateway/auth.py` which handles OIDC for the gateway). The interceptor uses a callable-based `user_extractor` to decouple from specific AuthManager implementations.
+
+Key classes in `linuxcnc_fleet/auth.py`:
+- `AuthContext` dataclass: extracted user context (sub, name, email, role, facility, machine_tags)
+- `AuthInterceptor`: gRPC server interceptor that extracts/validates tokens via user_extractor callable
+- `AuthDecorator`: role-level decorator pattern with role hierarchy (viewer < operator < programmer < maintainer < admin)
+- `create_auth_interceptor(user_extractor)`: factory function to create configured interceptor
 
 ---
 
@@ -908,11 +955,16 @@ Note: `linuxcnc_fleet/auth.py` contains the mTLS interceptor for FleetService RP
 - `protobuf`
 - `PyJWT` (OIDC token validation — HS256 + RS256 via JWKS)
 - `cryptography` (JWK to PEM conversion for RS256 key validation)
+- `aiohttp>=3.9.0` (optional, for fleet_ui HTTP server)
 - In-memory dict with threading lock (machine registry store)
 
 ### Client (`fleet_client/`)
 - `grpcio`, `protobuf`
 - Generated stubs from `fleet.proto`
+
+### UI (`fleet_ui/`) — Not Yet Implemented
+- `aiohttp>=3.9.0` (HTTP server for central UI)
+- Entry point: `fleet-ui = "fleet_ui.server:main"` (defined in pyproject.toml, implementation deferred)
 
 ### Build Tools
 - `protoc` + `grpcio-tools` for code generation
@@ -965,8 +1017,8 @@ fleet-gateway --port 50050 \
     --key /etc/linuxcnc-fleet/gateway-key.pem \
     --root-cert /etc/linuxcnc-fleet/ca.pem
 
-# 2. Run central UI (separate process)
-python -m fleet_ui --gateway localhost:50050
+# 2. Run central UI (separate process — not yet implemented)
+fleet-ui --gateway localhost:50050
 ```
 
 ---
@@ -1035,7 +1087,7 @@ python -m fleet_ui --gateway localhost:50050
 - [ ] TLS/mTLS certificate management (deferred)
 - [x] Gateway CLI entry point (`gateway/cli.py`)
   - [x] `fleet-gateway` with --port, --cert, --key, --root-cert, --jwt-secret, --jwks-url, --issuer, --audience
-  - [x] Argument validation (TLS pairs, JWT mutual exclusivity)
+   - [x] Argument validation (TLS pairs, JWT mutual exclusivity — requires either --jwt-secret or --jwks-url)
 - [x] mTLS interceptor for FleetService (`linuxcnc_fleet/auth.py`)
   - [x] AuthContext extraction from OIDC tokens via gRPC metadata
   - [x] Role-hierarchy checks on control/write RPCs (operator+ / programmer+)
@@ -1051,9 +1103,9 @@ python -m fleet_ui --gateway localhost:50050
 - [x] Unit tests: OIDC interceptor behavior (19 tests, `test_interceptor.py`)
 - **Cumulative: 281/281 tests passing** (73 Phase 1 + 208 Phase 2)
 
-### Phase 3: Client Library & UI Integration (Week 5-6)
-- [x] Implement `FleetClient` high-level library (`fleet_client/client.py`, ~1000 lines)
-- [x] OIDC auth interceptor (`fleet_client/auth.py`, ~60 lines)
+### Phase 3: Client Library & UI Integration (Week 5-6) ✅ COMPLETE
+- [x] Implement `FleetClient` high-level library (`fleet_client/client.py`, 1058 lines)
+- [x] OIDC auth interceptor (`fleet_client/auth.py`, 76 lines)
 - [x] Generated gRPC stubs for all services (regenerated with HomeAxis, SendMdiCommand, LoadProgram RPCs)
 - [x] Channel caching with TTL expiry (default 300s) and thread-safe cleanup
 - [x] Streaming status subscription support (async generators)
@@ -1088,11 +1140,15 @@ python -m fleet_ui --gateway localhost:50050
 
 ## Known Issues
 
-| # | File | Line | Issue | Severity | Status |
-|---|------|------|-------|----------|--------|
-| 1 | `gateway/server.py` | 133 | Type hint `DiscoveryRequest` doesn't exist — should be `DiscoverRequest` | Low | ✅ Fixed |
-| 2 | `linuxcnc_fleet/cli.py` | 117 | `AuthManager(secret=...)` should be `AuthManager(secret_key=...)` | High | ✅ Fixed |
-| 3 | `fleet_client/client.py` | 187-191 | `_get_or_create_machine_channel()` creates `insecure_channel` even when `tls_enabled=True` | Medium | ✅ Fixed |
+All previously documented bugs have been fixed:
+
+| # | File | Issue | Severity | Status |
+|---|------|-------|----------|--------|
+| 1 | `gateway/server.py` | Type hint `DiscoveryRequest` → `DiscoverRequest` | Low | ✅ Fixed |
+| 2 | `linuxcnc_fleet/cli.py` | `AuthManager(secret=...)` → `AuthManager(secret_key=...)` | High | ✅ Fixed |
+| 3 | `fleet_client/client.py` | `_get_or_create_machine_channel()` insecure channel when `tls_enabled=True` | Medium | ✅ Fixed |
+
+No remaining known issues.
 
 ---
 
