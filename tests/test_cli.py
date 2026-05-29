@@ -119,9 +119,53 @@ class TestTLSValidation:
         assert mock_run.called
 
 
+class TestSyslogArgs:
+    def test_syslog_default_false(self):
+        args = parse_args([])
+        assert args.syslog is False
+
+    def test_syslog_flag_enabled(self):
+        args = parse_args(["--syslog"])
+        assert args.syslog is True
+
+    def test_syslog_address_default(self):
+        args = parse_args([])
+        assert args.syslog_address == "/dev/log"
+
+    def test_syslog_address_custom(self):
+        args = parse_args(["--syslog-address", "/run/systemd/journal/syslog"])
+        assert args.syslog_address == "/run/systemd/journal/syslog"
+
+    def test_syslog_facility_default(self):
+        args = parse_args([])
+        assert args.syslog_facility == "user"
+
+    def test_syslog_facility_custom(self):
+        args = parse_args(["--syslog-facility", "daemon"])
+        assert args.syslog_facility == "daemon"
+
+    def test_all_syslog_options_together(self):
+        args = parse_args([
+            "--syslog",
+            "--syslog-address", "/run/systemd/journal/syslog",
+            "--syslog-facility", "local0",
+        ])
+        assert args.syslog is True
+        assert args.syslog_address == "/run/systemd/journal/syslog"
+        assert args.syslog_facility == "local0"
+
+
 class TestHelpOutput:
     def test_help_does_not_crash(self):
         """--help should raise SystemExit(0), not crash."""
         with pytest.raises(SystemExit) as exc_info:
             parse_args(["--help"])
         assert exc_info.value.code == 0
+
+    def test_syslog_in_help_output(self, capsys):
+        """--syslog flag should appear in help text."""
+        with pytest.raises(SystemExit) as exc_info:
+            parse_args(["--help"])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "--syslog" in captured.out

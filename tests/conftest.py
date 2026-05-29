@@ -173,6 +173,23 @@ def pytest_configure(config):
     sys.modules["_hal"] = hal
 
 
+def pytest_runtest_setup(item):
+    """Clean up logging handlers before each test to prevent cross-test pollution.
+
+    Some tests (e.g., syslog config tests) add MagicMock handlers to root.handlers
+    that can leak into subsequent tests and cause TypeError when Python's logging
+    tries to compare record.levelno >= handler.level (int vs MagicMock).
+    """
+    import logging
+
+    for handler in logging.root.handlers[:]:
+        try:
+            handler.close()
+        except (OSError, ValueError):
+            pass
+        logging.root.removeHandler(handler)
+
+
 def pytest_unconfigure(config):
     """Suppress pyvirtualdisplay/pytest-xvfb logging errors during teardown.
 

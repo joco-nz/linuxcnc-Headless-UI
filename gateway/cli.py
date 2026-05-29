@@ -68,6 +68,22 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=False,
         help="Enable verbose logging.",
     )
+    parser.add_argument(
+        "--syslog",
+        action="store_true",
+        default=False,
+        help="Enable logging to syslog in addition to stderr.",
+    )
+    parser.add_argument(
+        "--syslog-address",
+        default="/dev/log",
+        help="Syslog socket path (default: /dev/log).",
+    )
+    parser.add_argument(
+        "--syslog-facility",
+        default="user",
+        help="Syslog facility name (default: user). Options: kern, user, daemon, mail, syslog, auth, local0-local7.",
+    )
     return parser.parse_args(argv)
 
 
@@ -86,12 +102,21 @@ def validate_args(args: argparse.Namespace) -> list[str]:
     return errors
 
 
-def setup_logging(verbose: bool) -> None:
+def setup_logging(
+    verbose: bool = False,
+    use_syslog: bool = False,
+    syslog_address: str = "/dev/log",
+    syslog_facility: str = "user",
+) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
+
+    from linuxcnc_fleet.logging_config import setup_logging as _setup_logging
+
+    _setup_logging(
         level=level,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        use_syslog=use_syslog,
+        syslog_address=syslog_address,
+        syslog_facility=syslog_facility,
     )
 
 
@@ -115,7 +140,12 @@ def main(argv: Optional[list[str]] = None) -> None:
             print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 
-    setup_logging(args.verbose)
+    setup_logging(
+        verbose=args.verbose,
+        use_syslog=args.syslog,
+        syslog_address=args.syslog_address,
+        syslog_facility=args.syslog_facility,
+    )
     log = logging.getLogger(__name__)
 
     auth_manager = create_auth_manager(args)

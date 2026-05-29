@@ -79,6 +79,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Expected JWT audience (aud) claim.",
     )
+    parser.add_argument(
+        "--syslog",
+        action="store_true",
+        default=False,
+        help="Enable logging to syslog in addition to stderr.",
+    )
+    parser.add_argument(
+        "--syslog-address",
+        default="/dev/log",
+        help="Syslog socket path (default: /dev/log).",
+    )
+    parser.add_argument(
+        "--syslog-facility",
+        default="user",
+        help="Syslog facility name (default: user). Options: kern, user, daemon, mail, syslog, auth, local0-local7.",
+    )
 
     return parser.parse_args(argv)
 
@@ -87,11 +103,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     # Configure logging
+    from linuxcnc_fleet.logging_config import setup_logging
+
     log_level = logging.DEBUG if args.verbose >= 2 else logging.INFO if args.verbose >= 1 else logging.WARNING
-    logging.basicConfig(
+    setup_logging(
         level=log_level,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        use_syslog=args.syslog,
+        syslog_address=args.syslog_address,
+        syslog_facility=args.syslog_facility,
     )
 
     # Validate TLS arguments

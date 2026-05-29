@@ -198,8 +198,105 @@ def test_main_keyboard_interrupt(capsys):
             assert exc_info.value.code == 0
 
 
+class TestSyslogArgs:
+    def test_syslog_default_false(self):
+        from gateway.cli import parse_args
+        args = parse_args([])
+        assert args.syslog is False
+
+    def test_syslog_flag_enabled(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--syslog"])
+        assert args.syslog is True
+
+    def test_syslog_address_default(self):
+        from gateway.cli import parse_args
+        args = parse_args([])
+        assert args.syslog_address == "/dev/log"
+
+    def test_syslog_address_custom(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--syslog-address", "/run/systemd/journal/syslog"])
+        assert args.syslog_address == "/run/systemd/journal/syslog"
+
+    def test_syslog_facility_default(self):
+        from gateway.cli import parse_args
+        args = parse_args([])
+        assert args.syslog_facility == "user"
+
+    def test_syslog_facility_custom(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--syslog-facility", "daemon"])
+        assert args.syslog_facility == "daemon"
+
+    def test_all_syslog_options_together(self):
+        from gateway.cli import parse_args
+        args = parse_args([
+            "--syslog",
+            "--syslog-address", "/run/systemd/journal/syslog",
+            "--syslog-facility", "local0",
+        ])
+        assert args.syslog is True
+        assert args.syslog_address == "/run/systemd/journal/syslog"
+        assert args.syslog_facility == "local0"
+
+
 def test_help_output():
     from gateway.cli import parse_args
     with pytest.raises(SystemExit) as exc_info:
         parse_args(["--help"])
     assert exc_info.value.code == 0
+
+
+def test_syslog_in_help(capsys):
+    from gateway.cli import parse_args
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args(["--help"])
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "--syslog" in captured.out
+
+
+def test_setup_logging_with_syslog(monkeypatch):
+    import logging
+    from gateway.cli import setup_logging
+
+    mock_handler = MagicMock()
+    monkeypatch.setattr("logging.handlers.SysLogHandler", lambda **kwargs: mock_handler)
+
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+
+    setup_logging(verbose=False, use_syslog=True)
+
+    root = logging.getLogger()
+    console_handlers = [h for h in root.handlers if type(h).__name__ == "StreamHandler"]
+    syslog_handlers = [h for h in root.handlers if type(h).__name__ == "MagicMock" or type(h).__name__ == "SysLogHandler"]
+    assert len(console_handlers) == 1
+    assert len(syslog_handlers) == 1
+
+
+def test_setup_logging_syslog_facility(monkeypatch):
+    import logging
+    from gateway.cli import setup_logging
+
+    mock_handler = MagicMock()
+    monkeypatch.setattr("logging.handlers.SysLogHandler", lambda **kwargs: mock_handler)
+
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+
+    setup_logging(verbose=False, use_syslog=True, syslog_facility="daemon")
+
+
+def test_setup_logging_syslog_address(monkeypatch):
+    import logging
+    from gateway.cli import setup_logging
+
+    mock_handler = MagicMock()
+    monkeypatch.setattr("logging.handlers.SysLogHandler", lambda **kwargs: mock_handler)
+
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+
+    setup_logging(verbose=False, use_syslog=True, syslog_address="/run/systemd/journal/syslog")
