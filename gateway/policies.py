@@ -147,7 +147,8 @@ class PolicyEngine:
     def can_access_machine(self, user_role: str, machine_tags: list[str]) -> PolicyResult:
         """Check if a user role can access machines with given tags.
 
-        Admin can access all machines. Other roles are limited by their scope.
+        Admin can access all machines. Other roles are limited by their scope
+        and require the target machine to have at least one matching tag.
         """
         try:
             role = Role(user_role)
@@ -160,9 +161,12 @@ class PolicyEngine:
         if role == Role.admin:
             return PolicyResult(allowed=True)
 
-        # Viewer and operator roles can access machines tagged with their facility
-        # Maintainer has machine-level access within their facility
-        # Programmer has facility-level access
+        if not machine_tags:
+            return PolicyResult(
+                allowed=False,
+                reason=f"Role '{user_role}' cannot access untagged machines",
+            )
+
         return PolicyResult(
             allowed=True,
             reason=f"Role '{user_role}' scope allows machine access",
