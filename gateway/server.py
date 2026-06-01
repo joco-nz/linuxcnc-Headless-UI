@@ -376,16 +376,23 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
 
         streams: dict[str, queue.Queue] = {mid: queue.Queue() for mid, _ in clients}
         stop_event = threading.Event()
+        channels_to_close: list[grpc.Channel] = []
+        channel_lock = threading.Lock()
 
         def stream_from_machine(machine_id: str, client: _GrpcClient) -> None:
             try:
                 channel = client.connect()
+                with channel_lock:
+                    channels_to_close.append(channel)
                 stub = FleetServiceStub(channel)
                 # Subscribe to status updates
                 for status in stub.SubscribeStatus(MachineId(id=machine_id)):
                     if stop_event.is_set():
                         break
-                    streams[machine_id].put(status)
+                    try:
+                        streams[machine_id].put_nowait(status)
+                    except queue.Full:
+                        pass
             except Exception:
                 pass
 
@@ -394,6 +401,26 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
             t = threading.Thread(target=stream_from_machine, args=(mid, client), daemon=True)
             t.start()
             threads.append(t)
+
+        def _cleanup() -> None:
+            stop_event.set()
+            # Drain queues to unblock any put_nowait callers
+            for q in streams.values():
+                try:
+                    while True:
+                        q.get_nowait()
+                except queue.Empty:
+                    pass
+            # Wait for threads to finish
+            for t in threads:
+                t.join(timeout=2.0)
+            # Close gRPC channels
+            with channel_lock:
+                for ch in channels_to_close:
+                    try:
+                        ch.close()
+                    except Exception:
+                        pass
 
         try:
             # Interleave status updates from all machines
@@ -409,9 +436,7 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
         except grpc.RpcError:
             pass
         finally:
-            stop_event.set()
-            for t in threads:
-                t.join(timeout=2.0)
+            _cleanup()
 
 
 def create_gateway_server(
