@@ -6,6 +6,7 @@ import base64
 import dataclasses
 import json
 import logging
+import os
 import time
 from typing import Any, Optional
 
@@ -212,18 +213,33 @@ class AuthManager:
         self._jwks_expires_at = 0.0
 
 
-def create_test_auth_manager(secret_key: str = "test-secret-key-for-testing-32bytes!") -> AuthManager:
-    """Create an AuthManager configured for testing with HS256."""
+_TEST_SECRET_KEY = os.environ.get(
+    "TEST_SECRET_KEY",
+    "test-secret-key-for-testing-32bytes!",  # noqa: S105 — test-only, never used in production
+)
+
+
+def create_test_auth_manager(secret_key: str | None = None) -> AuthManager:
+    """Create an AuthManager configured for testing with HS256.
+
+    Args:
+        secret_key: Optional override; defaults to TEST_SECRET_KEY env var or fallback.
+    """
     return AuthManager(
         issuer="https://test.auth.example.com",
         audience="linuxcnc-fleet",
-        secret_key=secret_key,
+        secret_key=secret_key or _TEST_SECRET_KEY,
         algorithms=["HS256"],
     )
 
 
-def create_test_token(claims: dict[str, Any], secret_key: str = "test-secret-key-for-testing-32bytes!") -> str:
-    """Create a test JWT for unit tests."""
+def create_test_token(claims: dict[str, Any], secret_key: str | None = None) -> str:
+    """Create a test JWT for unit tests.
+
+    Args:
+        claims: JWT payload claims to include.
+        secret_key: Optional override; defaults to TEST_SECRET_KEY env var or fallback.
+    """
     now = int(time.time())
     payload = {
         "exp": now + 3600,  # 1 hour expiry
@@ -231,4 +247,4 @@ def create_test_token(claims: dict[str, Any], secret_key: str = "test-secret-key
         "aud": "linuxcnc-fleet",
         **claims,
     }
-    return jwt.encode(payload, secret_key, algorithm="HS256")
+    return jwt.encode(payload, secret_key or _TEST_SECRET_KEY, algorithm="HS256")
