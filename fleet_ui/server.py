@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import logging
+import ssl
 from typing import Any, Optional
 
 import aiohttp
@@ -1890,8 +1891,7 @@ def main() -> None:
     # TLS setup
     ssl_context = None
     if args.tls_cert and args.tls_key:
-        import ssl as _ssl
-        ssl_ctx = _ssl.create_default_context(_ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ssl_ctx.load_cert_chain(args.tls_cert, args.tls_key)
         ssl_context = ssl_ctx
 
