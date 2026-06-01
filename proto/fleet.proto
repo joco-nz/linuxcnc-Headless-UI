@@ -257,6 +257,25 @@ message ErrorList {
   repeated ErrorEvent errors = 1;
 }
 
+message ProgramEntry {
+  string path = 1;
+  string name = 2;
+  int64 size_bytes = 3;
+  double modified_time = 4;
+}
+
+message ProgramList {
+  repeated ProgramEntry programs = 1;
+  string directory = 2;
+  int32 total_count = 3;
+}
+
+message ListProgramsRequest {
+  MachineId id = 1;
+  string directory = 2;
+  int32 max_depth = 3;
+}
+
 message IniParamRequest {
   MachineId id = 1;
   string section = 2;
@@ -308,6 +327,7 @@ message BroadcastRequest {
     ExecutionCommand exec = 5;
     SetModeRequest mode = 6;
   }
+  string program_path = 7;
 }
 
 message BroadcastResult {
@@ -344,6 +364,7 @@ service FleetService {
   rpc SubscribeErrors(MachineId) returns (stream ErrorEvent);
   rpc GetMachineInfo(MachineId) returns (MachineInfo);
   rpc GetIniParam(IniParamRequest) returns (IniParamValue);
+  rpc ListPrograms(ListProgramsRequest) returns (ProgramList);
 }
 
 service FleetGatewayService {

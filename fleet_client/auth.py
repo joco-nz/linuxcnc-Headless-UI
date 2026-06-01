@@ -29,7 +29,7 @@ class BearerAuthInterceptor(grpc.UnaryUnaryClientInterceptor):
         """Intercept unary-unary calls to add authorization metadata."""
         metadata = list(client_call_details.metadata or [])
         metadata.append(("authorization", f"Bearer {self._token}"))
-        
+
         new_details = _ClientCallDetails(
             method=client_call_details.method,
             timeout=client_call_details.timeout,
@@ -38,7 +38,23 @@ class BearerAuthInterceptor(grpc.UnaryUnaryClientInterceptor):
             wait_for_ready=False,
             compression=grpc.Compression.NoCompression,
         )
-        
+
+        return continuation(new_details, request)
+
+    def intercept_unary_stream(self, continuation, client_call_details, request):
+        """Intercept unary-server-streaming calls to add authorization metadata."""
+        metadata = list(client_call_details.metadata or [])
+        metadata.append(("authorization", f"Bearer {self._token}"))
+
+        new_details = _ClientCallDetails(
+            method=client_call_details.method,
+            timeout=client_call_details.timeout,
+            metadata=metadata,
+            credentials=None,
+            wait_for_ready=False,
+            compression=grpc.Compression.NoCompression,
+        )
+
         return continuation(new_details, request)
 
 

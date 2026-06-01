@@ -26,6 +26,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     MachineStatus,
     MdiCommand,
     Mode,
+    ProgramPath,
     Result,
     SetModeRequest,
     SubscribeAllRequest,
@@ -268,6 +269,8 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
             cmd_type = "execution"
         elif request.HasField('mode'):
             cmd_type = "mode"
+        elif request.program_path:
+            cmd_type = "program"
 
         auth_result = self.policies.check_broadcast_authorization(user.role, cmd_type)
         if not auth_result.allowed:
@@ -323,6 +326,10 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
                 return stub.SetExecution(request.exec)
             elif request.HasField('mode'):
                 return stub.SetMode(request.mode)
+            elif request.program_path:
+                return stub.LoadProgram(
+                    ProgramPath(id=MachineId(id=machine_id), path=request.program_path)
+                )
             else:
                 return Result(
                     success=False,

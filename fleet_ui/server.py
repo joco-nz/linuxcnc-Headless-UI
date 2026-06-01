@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Optional
@@ -24,8 +25,9 @@ log = logging.getLogger(__name__)
 class _SSEStream:
     """Manages a single SSE client connection."""
 
-    def __init__(self, request: web.Request) -> None:
+    def __init__(self, request: web.Request | None, machine_id: str = "") -> None:
         self._request = request
+        self.machine_id = machine_id
         self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
         self._done = False
 
@@ -39,9 +41,9 @@ class _SSEStream:
     async def _iter_lines(self) -> Any:
         while not self._done:
             try:
-                data = await asyncio.wait_for(self._queue.get(), timeout=30.0)
-                yield f"data: {data}\n\n"
-            except (asyncio.TimeoutError, web.RequestDisconnectedError):
+                data = await asyncio.wait_for(self._queue.get(), timeout=120.0)
+                yield f"data: {json.dumps(data)}\n\n"
+            except Exception:
                 break
 
     def close(self) -> None:
@@ -58,10 +60,12 @@ class FleetApp:
         gateway_address: str,
         token: str,
         tls_enabled: bool = False,
+        _mock_client: Any = None,
     ) -> None:
         self._gateway_address = gateway_address
         self._token = token
         self._tls_enabled = tls_enabled
+        self._mock_client = _mock_client
         self._client: Optional[FleetClient] = None
         self._machines: list[MachineEntry] = []
         self._streams: dict[str, _SSEStream] = {}  # machine_id -> stream
@@ -69,6 +73,8 @@ class FleetApp:
         self._lock = asyncio.Lock()
 
     async def init(self) -> None:
+        if self._mock_client is not None:
+            return
         if FleetClient is None:
             raise RuntimeError("fleet_client package not installed")
         self._client = FleetClient(
@@ -78,11 +84,14 @@ class FleetApp:
         )
 
     async def close(self) -> None:
-        if self._client:
-            await self._client.close()
+        client = self._mock_client if self._mock_client is not None else self._client
+        if client:
+            await client.close()
 
     async def _ensure_client(self) -> FleetClient:
-        if self._client is None or self._client._closed:
+        if self._mock_client is not None:
+            return self._mock_client  # type: ignore[return-value]
+        if self._client is None or getattr(self._client, '_closed', False):
             await self.init()
         return self._client
 
@@ -92,7 +101,7 @@ class FleetApp:
         client = await self._ensure_client()
         try:
             machines = await client.get_machines()
-            with self._lock:
+            async with self._lock:
                 self._machines = machines
             return [
                 {
@@ -114,7 +123,7 @@ class FleetApp:
         try:
             status = await client.get_status(machine_id)
             result = _status_to_dict(status)
-            with self._lock:
+            async with self._lock:
                 self._last_status[machine_id] = result
             return result
         except Exception as e:
@@ -153,6 +162,29 @@ class FleetApp:
             return {"success": result.success, "message": result.message}
         except Exception as e:
             return {"success": False, "message": str(e)}
+
+    async def broadcast_load_program(self, scope: str, path: str,
+                                      facility: str = "", tags: list[str] | None = None) -> dict:
+        client = await self._ensure_client()
+        try:
+            results = await client.broadcast_load_program(scope, path, facility, tags or [])
+            return {"results": {mid: {"success": s, "message": m} for mid, (s, m) in results.items()}}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def list_programs(self, machine_id: str, directory: str = "", max_depth: int = 0) -> dict:
+        client = await self._ensure_client()
+        try:
+            pl = await client.list_programs(machine_id, directory, max_depth)
+            return {
+                "programs": [
+                    {"path": p.path, "name": p.name, "size_bytes": p.size_bytes, "modified_time": p.modified_time}
+                    for p in pl.programs
+                ],
+                "total": pl.total_count,
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
     async def control(self, machine_id: str, cmd: str) -> dict:
         client = await self._ensure_client()
@@ -210,7 +242,6 @@ class FleetApp:
             return {
                 "pin_name": pin.pin_name,
                 "type": _hal_type_to_str(pin.type),
-                "is_output": pin.is_output,
                 "value_f": pin.value_f,
                 "value_u32": pin.value_u32,
                 "value_s32": pin.value_s32,
@@ -260,7 +291,7 @@ class FleetApp:
             try:
                 async for status in client.subscribe_status(machine_id):
                     data = _status_to_dict(status)
-                    with self._lock:
+                    async with self._lock:
                         self._last_status[machine_id] = data
                     stream = app._streams.get(machine_id)
                     if stream is not None:
@@ -268,18 +299,17 @@ class FleetApp:
             except Exception as e:
                 log.error("Stream %s error: %s", machine_id, e)
 
-        stream = _SSEStream(None)  # created in handler
-        with self._lock:
+        stream = _SSEStream(None, machine_id=machine_id)
+        async with self._lock:
             self._streams[machine_id] = stream
 
         asyncio.create_task(_stream_loop())
         return stream
 
     def remove_stream(self, machine_id: str) -> None:
-        with self._lock:
-            if machine_id in self._streams:
-                self._streams[machine_id].close()
-                del self._streams[machine_id]
+        if machine_id in self._streams:
+            self._streams[machine_id].close()
+            del self._streams[machine_id]
 
     async def stream_all_machines(self) -> _SSEStream:
         app = self
@@ -293,7 +323,7 @@ class FleetApp:
             try:
                 async for machine_id, status in client.subscribe_all_status():
                     data = _status_to_dict(status)
-                    with self._lock:
+                    async with self._lock:
                         self._last_status[machine_id] = data
                     stream = app._streams.get("__all__")
                     if stream is not None:
@@ -301,21 +331,20 @@ class FleetApp:
             except Exception as e:
                 log.error("StreamAll error: %s", e)
 
-        stream = _SSEStream(None)  # created in handler
-        with self._lock:
+        stream = _SSEStream(None, machine_id="__all__")
+        async with self._lock:
             self._streams["__all__"] = stream
 
         asyncio.create_task(_stream_loop())
         return stream
 
     def remove_all_stream(self) -> None:
-        with self._lock:
-            if "__all__" in self._streams:
-                self._streams["__all__"].close()
-                del self._streams["__all__"]
+        if "__all__" in self._streams:
+            self._streams["__all__"].close()
+            del self._streams["__all__"]
 
     async def get_last_status(self, machine_id: str) -> Optional[dict]:
-        with self._lock:
+        async with self._lock:
             return self._last_status.get(machine_id)
 
 
@@ -504,6 +533,21 @@ main {
 .machine-item:hover { background: var(--bg-tertiary); }
 .machine-item.active { background: var(--bg-tertiary); border: 1px solid var(--accent-blue); }
 
+.machine-checkbox { width: 16px; height: 16px; accent-color: var(--accent-blue); cursor: pointer; flex-shrink: 0; }
+.selected-count { padding: 8px 12px; font-size: 12px; color: var(--text-secondary); border-top: 1px solid var(--border); text-align: center; }
+.selected-count span { color: var(--accent-blue); font-weight: 600; }
+
+.program-load-row { display: flex; gap: 8px; align-items: center; }
+.program-load-row input[type="text"] { flex: 1; min-width: 0; }
+.broadcast-result-item { padding: 4px 0; font-size: 13px; border-bottom: 1px solid var(--border); }
+.broadcast-result-item.success { color: var(--accent-green); }
+.broadcast-result-item.error { color: var(--accent-red); }
+.program-browser { max-height: 300px; overflow-y: auto; background: var(--bg-tertiary); border-radius: 6px; padding: 8px; margin-top: 8px; }
+.program-entry { padding: 6px 8px; cursor: pointer; border-radius: 4px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+.program-entry:hover { background: var(--bg-secondary); }
+.program-name { font-family: 'SF Mono', 'Fira Code', monospace; color: var(--accent-blue); }
+.program-meta { font-size: 11px; color: var(--text-secondary); }
+
 .machine-dot {
   width: 10px;
   height: 10px;
@@ -562,6 +606,15 @@ main {
 
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
+
+/* Modal */
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.modal-overlay.hidden { display: none; }
+.modal { background: var(--bg-primary); border-radius: 12px; width: 90%; max-width: 600px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+.modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+.modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+.close-btn { background: none; border: none; font-size: 24px; cursor: pointer; color: var(--text-secondary); padding: 0 4px; }
+.close-btn:hover { color: var(--text-primary); }
 
 /* Status cards */
 .status-grid {
@@ -804,9 +857,12 @@ main {
 
   <!-- Dashboard view -->
   <div id="dashboard-view" class="hidden">
-    <aside class="sidebar">
+   <aside class="sidebar">
       <div class="sidebar-header">Machines (<span id="machine-count">0</span>)</div>
       <div class="machine-list" id="machine-list"></div>
+      <div class="selected-count" id="selected-count" style="display:none">
+        <span id="selected-count-num">0</span> machines selected
+      </div>
     </aside>
 
     <div class="content" id="content-area">
@@ -858,6 +914,17 @@ main {
             <h3>Motion Controls</h3>
             <div class="control-buttons" id="motion-buttons"></div>
           </div>
+          <div class="control-group">
+            <h3>Broadcast Program Load</h3>
+            <div class="program-load-row">
+              <input id="broadcast-program-path" type="text" placeholder="/path/to/file.ngc" onkeydown="if(event.key==='Enter')broadcastLoadProgram()">
+              <button class="btn primary" onclick="broadcastLoadProgram()">Broadcast</button>
+            </div>
+            <div style="margin-top: 8px;">
+              <button class="btn" onclick="openProgramBrowser()" style="font-size: 13px;">Browse Programs...</button>
+            </div>
+            <div id="broadcast-results" class="hidden" style="margin-top: 12px;"></div>
+          </div>
         </div>
 
         <!-- HAL Pins Tab -->
@@ -878,12 +945,33 @@ main {
   </div>
 </main>
 
+<!-- Program Browser Modal -->
+<div id="program-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeProgramBrowser()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 style="margin:0;font-size:18px;">Program Browser</h3>
+      <button class="close-btn" onclick="closeProgramBrowser()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <input id="program-browser-target" type="text" placeholder="Machine ID" style="flex:1;">
+        <button class="btn" onclick="refreshProgramBrowser()">Refresh</button>
+      </div>
+      <div id="program-browser-content">
+        <div class="empty-state">Select a machine and click Refresh</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast-container" id="toast-container"></div>
 
 <script>
 // ── State ────────────────────────────────────────────────────────────────────
 let fleet = { connected: false, client: null };
 let selectedMachine = null;
+let selectedMachines = new Set();
+let lastSelectedIndex = -1;
 let eventSources = {};
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -923,15 +1011,19 @@ async function refreshMachines() {
 
     const list = document.getElementById('machine-list');
     list.innerHTML = '';
-    machines.forEach(m => {
+    machines.forEach((m, idx) => {
       const lastStatus = m._last_status || {};
       const state = (lastStatus.state || '').toLowerCase();
       const dotClass = state === 'running' ? 'running' : state === 'paused' ? 'paused' : state === 'e_stopped' ? 'estop' : 'stopped';
+      const isChecked = selectedMachines.has(m.machine_id);
 
       const item = document.createElement('div');
       item.className = `machine-item${m.machine_id === selectedMachine ? ' active' : ''}`;
-      item.onclick = () => selectMachine(m.machine_id);
+      item.setAttribute('data-index', idx);
+      item.setAttribute('data-id', m.machine_id);
+      item.onclick = (e) => handleMachineClick(e, m.machine_id, idx);
       item.innerHTML = `
+        <input type="checkbox" class="machine-checkbox" ${isChecked ? 'checked' : ''} onclick="event.stopPropagation();toggleSelect('${m.machine_id}', event)" onkeydown="event.stopPropagation()">
         <div class="machine-dot ${dotClass}"></div>
         <div>
           <div class="machine-name">${m.machine_name || m.machine_id}</div>
@@ -941,6 +1033,69 @@ async function refreshMachines() {
     });
   } catch (e) {
     console.error('refreshMachines:', e);
+  }
+}
+
+// ── Multi-Select ─────────────────────────────────────────────────────────────
+function handleMachineClick(e, machineId, idx) {
+  if (e.ctrlKey || e.metaKey) {
+    toggleSelect(machineId);
+  } else if (e.shiftKey && lastSelectedIndex >= 0) {
+    rangeSelect(lastSelectedIndex, idx);
+  } else {
+    selectMachine(machineId);
+    selectedMachines.clear();
+    lastSelectedIndex = idx;
+    updateSelectedCount();
+    refreshMachineListCheckboxes();
+  }
+}
+
+function toggleSelect(machineId, e) {
+  if (selectedMachines.has(machineId)) {
+    selectedMachines.delete(machineId);
+  } else {
+    selectedMachines.add(machineId);
+  }
+  lastSelectedIndex = parseInt(e?.target?.closest('.machine-item')?.getAttribute('data-index') || '-1');
+  updateSelectedCount();
+  refreshMachineListCheckboxes();
+}
+
+function rangeSelect(fromIdx, toIdx) {
+  if (fromIdx === -1 || lastSelectedIndex === -1) return;
+  const start = Math.min(fromIdx, lastSelectedIndex);
+  const end = Math.max(fromIdx, lastSelectedIndex);
+  const list = document.getElementById('machine-list');
+  const items = list.querySelectorAll('.machine-item');
+  for (let i = start; i <= end; i++) {
+    if (items[i]) {
+      const id = items[i].getAttribute('data-id');
+      selectedMachines.add(id);
+    }
+  }
+  updateSelectedCount();
+  refreshMachineListCheckboxes();
+}
+
+function refreshMachineListCheckboxes() {
+  const list = document.getElementById('machine-list');
+  const items = list.querySelectorAll('.machine-item');
+  items.forEach(item => {
+    const id = item.getAttribute('data-id');
+    const cb = item.querySelector('.machine-checkbox');
+    if (cb) cb.checked = selectedMachines.has(id);
+  });
+}
+
+function updateSelectedCount() {
+  const countEl = document.getElementById('selected-count');
+  const numEl = document.getElementById('selected-count-num');
+  if (selectedMachines.size > 0) {
+    countEl.style.display = 'block';
+    numEl.textContent = selectedMachines.size;
+  } else {
+    countEl.style.display = 'none';
   }
 }
 
@@ -1148,6 +1303,111 @@ async function loadProgram() {
   }
 }
 
+async function broadcastLoadProgram() {
+  if (selectedMachines.size === 0) {
+    showToast('No machines selected', 'error');
+    return;
+  }
+  const input = document.getElementById('broadcast-program-path');
+  const path = input.value.trim();
+  if (!path) {
+    showToast('Enter a program path', 'error');
+    return;
+  }
+
+  const resultsDiv = document.getElementById('broadcast-results');
+  resultsDiv.classList.remove('hidden');
+  resultsDiv.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">Broadcasting...</div>';
+
+  try {
+    const resp = await fetch('/api/programs/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'SELECTED', path, facility: '', tags: [] }),
+    });
+    const result = await resp.json();
+    if (result.error) throw new Error(result.error);
+
+    let html = '';
+    for (const [machineId, res] of Object.entries(result.results)) {
+      const cls = res.success ? 'success' : 'error';
+      html += `<div class="broadcast-result-item ${cls}">${machineId}: ${res.message}</div>`;
+    }
+    resultsDiv.innerHTML = html;
+
+    const successCount = Object.values(result.results).filter(r => r.success).length;
+    showToast(`Loaded on ${successCount}/${result.results.length} machines`, 'success');
+  } catch (e) {
+    resultsDiv.innerHTML = `<div class="broadcast-result-item error">${e.message}</div>`;
+    showToast(`Broadcast failed: ${e.message}`, 'error');
+  }
+}
+
+function openProgramBrowser() {
+  document.getElementById('program-modal').classList.remove('hidden');
+  const targetInput = document.getElementById('program-browser-target');
+  if (selectedMachine) {
+    targetInput.value = selectedMachine;
+  } else {
+    targetInput.value = '';
+    targetInput.placeholder = 'Enter machine ID';
+  }
+  refreshProgramBrowser();
+}
+
+function closeProgramBrowser() {
+  document.getElementById('program-modal').classList.add('hidden');
+}
+
+async function refreshProgramBrowser() {
+  const machineId = document.getElementById('program-browser-target').value.trim();
+  if (!machineId) {
+    document.getElementById('program-browser-content').innerHTML = '<div class="empty-state">Enter a machine ID</div>';
+    return;
+  }
+
+  document.getElementById('program-browser-content').innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">Loading programs...</div>';
+
+  try {
+    const resp = await fetch(`/api/programs/${machineId}`);
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+
+    const programs = data.programs || [];
+    if (programs.length === 0) {
+      document.getElementById('program-browser-content').innerHTML = '<div class="empty-state">No programs found</div>';
+      return;
+    }
+
+    let html = '<div class="program-browser">';
+    programs.forEach(p => {
+      const sizeStr = p.size_bytes > 0 ? ` · ${formatBytes(p.size_bytes)}` : '';
+      const timeStr = p.modified_time ? ` · ${new Date(p.modified_time).toLocaleString()}` : '';
+      html += `<div class="program-entry" onclick="useProgramPath('${p.path.replace(/'/g, "\\'")}')">
+        <span class="program-name">${p.name}</span>
+        <span class="program-meta">${sizeStr}${timeStr}</span>
+      </div>`;
+    });
+    html += '</div>';
+    document.getElementById('program-browser-content').innerHTML = html;
+  } catch (e) {
+    document.getElementById('program-browser-content').innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+  }
+}
+
+function useProgramPath(path) {
+  const input = document.getElementById('broadcast-program-path');
+  input.value = path;
+  closeProgramBrowser();
+  showToast(`Path loaded: ${path}`);
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
 async function doControl(cmd) {
   if (!selectedMachine) return;
   try {
@@ -1330,7 +1590,7 @@ async def handle_stream(request: web.Request) -> web.Response:
 
     async def _stream_generator():
         if last_status:
-            yield f"data: {last_status}\n\n"
+            yield f"data: {json.dumps(last_status)}\n\n"
         try:
             async for line in stream._iter_lines():
                 yield line
@@ -1339,9 +1599,8 @@ async def handle_stream(request: web.Request) -> web.Response:
         finally:
             app_state.remove_stream(machine_id)
 
-    return web.StreamResponse(
-        status=200,
-        reason='OK',
+    return web.AsyncIterableResponse(
+        _stream_generator(),
         headers={
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
@@ -1361,7 +1620,7 @@ async def handle_stream_all(request: web.Request) -> web.Response:
     for m in machines:
         last = await app_state.get_last_status(m['machine_id'])
         if last:
-            initial_data.append(f"data: {last}\n\n")
+            initial_data.append(f"data: {json.dumps(last)}\n\n")
 
     stream = await app_state.stream_all_machines()
 
@@ -1376,9 +1635,8 @@ async def handle_stream_all(request: web.Request) -> web.Response:
         finally:
             app_state.remove_all_stream()
 
-    return web.StreamResponse(
-        status=200,
-        reason='OK',
+    return web.AsyncIterableResponse(
+        _stream_generator(),
         headers={
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
@@ -1429,6 +1687,29 @@ async def handle_program(request: web.Request) -> web.Response:
     path = body.get('path', '')
 
     result = await app_state.load_program(machine_id, path)
+    return web.json_response(result)
+
+
+async def handle_program_broadcast(request: web.Request) -> web.Response:
+    """Broadcast load a G-code program to multiple machines."""
+    app_state = request.app['fleet']
+    body = await request.json()
+    result = await app_state.broadcast_load_program(
+        scope=body.get('scope', 'ALL'),
+        path=body.get('path', ''),
+        facility=body.get('facility', ''),
+        tags=body.get('tags', []),
+    )
+    return web.json_response(result)
+
+
+async def handle_list_programs(request: web.Request) -> web.Response:
+    """List available G-code programs on a machine."""
+    app_state = request.app['fleet']
+    machine_id = request.match_info['id']
+    directory = request.query.get('directory', '')
+    max_depth = int(request.query.get('max_depth', '0'))
+    result = await app_state.list_programs(machine_id, directory, max_depth)
     return web.json_response(result)
 
 
@@ -1504,6 +1785,8 @@ def create_routes(app: web.Application) -> None:
     app.router.add_post('/api/mode/{id}', handle_mode)
     app.router.add_post('/api/mdi/{id}', handle_mdi)
     app.router.add_post('/api/program/{id}', handle_program)
+    app.router.add_post('/api/programs/broadcast', handle_program_broadcast)
+    app.router.add_get('/api/programs/{id}', handle_list_programs)
     app.router.add_post('/api/control/{id}/{cmd}', handle_control)
     app.router.add_get('/api/hal/{id}', handle_hal_list)
     app.router.add_get('/api/hal/pin/{id}/{pin}', handle_hal_pin)

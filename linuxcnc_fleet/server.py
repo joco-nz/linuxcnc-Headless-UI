@@ -30,6 +30,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     IniParamRequest,
     IniParamValue,
     ListHalRequest,
+    ListProgramsRequest,
     MachineId,
     MachineInfo,
     MachineList,
@@ -38,6 +39,8 @@ from linuxcnc_fleet.fleet_pb2 import (
     Mode,
     PositionRequest,
     PositionResponse,
+    ProgramEntry,
+    ProgramList,
     ProgramPath,
     Result,
     SetModeRequest,
@@ -75,6 +78,18 @@ class FleetServiceRPC(FleetServiceServicer):
         if hasattr(request, 'auth_context') and not callable(getattr(request, 'auth_context', None)):
             return request.auth_context
         return None
+
+    def _check_read_access(self, request: Any, context: grpc.ServicerContext, method_name: str) -> bool:
+        """Check if caller has read access. Returns True if allowed."""
+        auth_ctx = self._get_auth_context(request, context)
+        if auth_ctx is None:
+            return True  # No auth configured — allow all
+        
+        user_level = self.role_hierarchy.get(auth_ctx.role, 0)
+        if user_level < 0:  # viewer or higher required
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Role '{auth_ctx.role}' insufficient for read operations")
+            return False
+        return True
 
     def _check_control_access(self, request: Any, context: grpc.ServicerContext, method_name: str) -> bool:
         """Check if caller has control access. Returns True if allowed."""
@@ -178,6 +193,28 @@ class FleetServiceRPC(FleetServiceServicer):
         if not self._check_write_access(request, context, "LoadProgram"):
             return Result(success=False, message="Access denied")
         return self.sidecar.load_program(request.path)
+
+    def ListPrograms(
+        self, request: ListProgramsRequest, context: grpc.ServicerContext
+    ) -> ProgramList:
+        if not self._check_read_access(request, context, "ListPrograms"):
+            return ProgramList()
+        try:
+            programs = self.sidecar.list_programs(request.directory, request.max_depth)
+            entries = [
+                ProgramEntry(
+                    path=p["path"], name=p["name"],
+                    size_bytes=p["size_bytes"], modified_time=p["modified_time"],
+                )
+                for p in programs
+            ]
+            return ProgramList(
+                programs=entries, directory=request.directory or "",
+                total_count=len(entries),
+            )
+        except Exception as e:
+            log.error("ListPrograms RPC failed: %s", e)
+            return ProgramList()
 
     def StepForward(self, request: Empty, context: grpc.ServicerContext) -> Result:
         if not self._check_control_access(request, context, "StepForward"):

@@ -146,6 +146,11 @@ class FleetServiceStub(object):
                 request_serializer=fleet__pb2.IniParamRequest.SerializeToString,
                 response_deserializer=fleet__pb2.IniParamValue.FromString,
                 _registered_method=True)
+        self.ListPrograms = channel.unary_unary(
+                '/linuxcnc_fleet.FleetService/ListPrograms',
+                request_serializer=fleet__pb2.ListProgramsRequest.SerializeToString,
+                response_deserializer=fleet__pb2.ProgramList.FromString,
+                _registered_method=True)
 
 
 class FleetServiceServicer(object):
@@ -285,6 +290,12 @@ class FleetServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListPrograms(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FleetServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -397,6 +408,11 @@ def add_FleetServiceServicer_to_server(servicer, server):
                     servicer.GetIniParam,
                     request_deserializer=fleet__pb2.IniParamRequest.FromString,
                     response_serializer=fleet__pb2.IniParamValue.SerializeToString,
+            ),
+            'ListPrograms': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListPrograms,
+                    request_deserializer=fleet__pb2.ListProgramsRequest.FromString,
+                    response_serializer=fleet__pb2.ProgramList.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -995,6 +1011,33 @@ class FleetService(object):
             '/linuxcnc_fleet.FleetService/GetIniParam',
             fleet__pb2.IniParamRequest.SerializeToString,
             fleet__pb2.IniParamValue.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListPrograms(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/linuxcnc_fleet.FleetService/ListPrograms',
+            fleet__pb2.ListProgramsRequest.SerializeToString,
+            fleet__pb2.ProgramList.FromString,
             options,
             channel_credentials,
             insecure,

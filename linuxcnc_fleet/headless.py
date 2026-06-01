@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import threading
 import time
 from typing import Any, Optional
@@ -613,6 +614,59 @@ class LinuxCncSidecar:
             return Result(success=True, message=f"Program loaded: {path}")
         except Exception as e:
             return Result(success=False, message=str(e), error_code=ErrorCode.INTERNAL_ERROR)
+
+    def list_programs(self, directory: str = "", max_depth: int = 0) -> list[dict]:
+        """List available G-code programs on the machine.
+
+        Reads program_extension from INI [TRAJ] and scans subdirectories
+        to find matching files.
+
+        Args:
+            directory: Base directory to scan (default: INI subdirectory).
+            max_depth: Recursion depth limit, 0=infinite.
+
+        Returns:
+            List of dicts with path, name, size_bytes, modified_time.
+        """
+        try:
+            extensions_str = self._ini("TRAJ", "program_extension") or "ngc"
+            extensions = set(extensions_str.split())
+
+            if not directory:
+                directory = self._ini("RS274", "subdirectory") or ""
+                if not directory:
+                    directory = self._ini("EMC_TASK_CALL_SUB_DIRECTORY") or "."
+
+            programs = []
+            root_depth = directory.rstrip(os.sep).count(os.sep)
+
+            for root, dirs, files in os.walk(directory):
+                if max_depth > 0:
+                    current_depth = root.count(os.sep) - root_depth
+                    if current_depth >= max_depth:
+                        dirs.clear()
+                        continue
+
+                for f in files:
+                    ext = os.path.splitext(f)[1].lstrip('.').lower()
+                    if ext in extensions:
+                        full_path = os.path.join(root, f)
+                        try:
+                            stat = os.stat(full_path)
+                            programs.append({
+                                "path": full_path,
+                                "name": os.path.splitext(f)[0],
+                                "size_bytes": stat.st_size,
+                                "modified_time": stat.st_mtime,
+                            })
+                        except OSError:
+                            pass
+
+            return sorted(programs, key=lambda p: p["modified_time"], reverse=True)
+
+        except Exception as e:
+            log.error("ListPrograms failed: %s", e)
+            return []
 
     def step_forward(self) -> Result:
         """Step forward one block in MDA mode."""

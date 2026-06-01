@@ -227,7 +227,7 @@ class PolicyEngine:
 
         Args:
             user_role: The user's role string.
-            command_type: One of 'mdi', 'execution', 'mode'.
+            command_type: One of 'mdi', 'execution', 'mode', 'program'.
 
         Returns PolicyResult with allowed/False and reason.
         """
@@ -253,6 +253,14 @@ class PolicyEngine:
             return PolicyResult(
                 allowed=False,
                 reason=f"Role '{user_role}' cannot change mode",
+            )
+        elif command_type == "program":
+            result = self.has_permission(user_role, Permission.LOAD_PROGRAM)
+            if result.allowed:
+                return PolicyResult(allowed=True, reason="Program load permissions granted")
+            return PolicyResult(
+                allowed=False,
+                reason=f"Role '{user_role}' cannot load programs",
             )
 
         return PolicyResult(

@@ -886,22 +886,22 @@ linuxcnc-fleet/
 │   └── fleet.proto              # gRPC service definition (all RPCs + messages) — 354 lines
 ├── linuxcnc_fleet/
 │   ├── __init__.py
-│   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module — 699 lines
-│   ├── server.py                # gRPC server per instance + FleetServiceRPC — 435 lines
-│   ├── cli.py                   # CLI entry point: headless-server --ini ... + OIDC args (--jwt-secret, --jwks-url, --issuer, --audience) — 148 lines
+│   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module — 753 lines
+│   ├── server.py                # gRPC server per instance + FleetServiceRPC — 459 lines
+│   ├── cli.py                   # CLI entry point: headless-server --ini ... + OIDC args (--jwt-secret, --jwks-url, --issuer, --audience) — 167 lines
 │   └── auth.py                  # mTLS/OIDC interceptor for FleetService (AuthContext, AuthInterceptor, AuthDecorator) — 146 lines
 ├── gateway/
 │   ├── __init__.py
-│   ├── server.py                # FleetGatewayService implementation + helper methods — 488 lines
+│   ├── server.py                # FleetGatewayService implementation + helper methods — 492 lines
 │   ├── auth.py                  # OIDC token validation + user extraction — 234 lines
 │      # AuthManager, User dataclass, extract_user(), validate_token(), _parse_claims()
 │      # create_test_auth_manager(), create_test_token(), clear_jwks_cache()
-│   ├── policies.py              # RBAC policy engine — 303 lines
+│   ├── policies.py              # RBAC policy engine — 311 lines
 │   ├── registry.py              # Machine registration + discovery store — 206 lines
-│   └── cli.py                   # Gateway CLI entry point: fleet-gateway — validate_args() requires auth config — 144 lines
+│   └── cli.py                   # Gateway CLI entry point: fleet-gateway — validate_args() requires auth config — 174 lines
 ├── fleet_client/
 │   ├── __init__.py
-│   ├── client.py                # FleetClient high-level library (28+ public methods) — 1058 lines
+│   ├── client.py                # FleetClient high-level library (28+ public methods) — 1161 lines
 │      # Gateway RPC wrappers: get_machines, route_machine, broadcast_command/mode/execution/mdi, subscribe_all_status
 │      # FleetService wrappers: all 21 RPCs as async methods + 3 streaming subscriptions
 │      # _CachedChannel with TTL, lazy cleanup, _retry_read(), test injection params
@@ -914,19 +914,20 @@ linuxcnc-fleet/
 │   ├── test_state_mapping.py    # Phase 1: state mapping correctness (26 tests)
 │   ├── test_snapshot.py         # Phase 1: snapshot immutability (7 tests)
 │   ├── test_sidecar.py          # Phase 1: control command error paths (22 tests)
-│   ├── test_cli.py              # Phase 1: CLI argument parsing (18 tests)
+│   ├── test_cli.py              # Phase 1: CLI argument parsing (26 tests)
 │   ├── test_auth.py             # Phase 2: OIDC token parsing + expiration (31 tests)
 │   ├── test_policies.py         # Phase 2: RBAC policy evaluation (62 tests)
 │   ├── test_registry.py         # Phase 2: machine registry CRUD + TTL expiry (41 tests)
 │   ├── test_gateway.py          # Phase 2: broadcast fan-out (35 tests)
-│   ├── test_gateway_cli.py      # Phase 2: gateway CLI parsing (20 tests)
+│   ├── test_gateway_cli.py      # Phase 2: gateway CLI parsing (31 tests)
 │   ├── test_interceptor.py      # Phase 2: OIDC interceptor behavior (19 tests)
 │   ├── test_fleet_client.py     # Phase 3: FleetClient routing, streaming, retry (46 tests)
+│   ├── test_logging_config.py   # Phase 5: syslog logging configuration (16 tests)
 │   └── test_integration.py      # Phase 4: full flow integration (17 tests)
 ├── scripts/
-│   ├── single-machine.md        # Single machine setup guide (deferred)
-│   ├── verify.py                # Setup verification script (deferred)
-│   └── setup-single-machine.sh  # Automated single machine setup (deferred)
+│   ├── single-machine.md        # Single machine setup guide
+│   ├── verify.py                # Setup verification script
+│   └── setup-single-machine.sh  # Automated single machine setup
 ├── certs/                       # TLS certificates (git-ignored, directory not yet created)
 ├── pyproject.toml               # Package definition + dependencies (87 lines, includes fleet-ui entry point + ui extras)
 └── Makefile                     # Build: proto generation, install (not yet created)
@@ -1060,9 +1061,9 @@ fleet-ui --gateway localhost:50050
 - [ ] Test against a single LinuxCNC instance (uspace mode) — requires target machine
 - [x] Unit tests: state mapping correctness (26 tests, `test_state_mapping.py`)
 - [x] Unit tests: snapshot immutability and atomic swap behavior (7 tests, `test_snapshot.py`)
-- [x] Unit tests: CLI argument parsing and TLS validation (18 tests, `test_cli.py`)
+- [x] Unit tests: CLI argument parsing and TLS validation (26 tests, `test_cli.py`)
 - [x] Unit tests: control command error paths (22 tests, `test_sidecar.py`)
-- **Total: 73/73 tests passing**
+- **Total: 81/81 tests passing**
 
 ### Phase 2: Gateway & Auth (Week 3-4) ✅ COMPLETE
 - [x] Implement FleetGatewayService RPCs (`gateway/server.py`)
@@ -1099,12 +1100,12 @@ fleet-ui --gateway localhost:50050
 - [x] Unit tests: RBAC policy evaluation — role + facility + tags filtering (62 tests, `test_policies.py`)
 - [x] Unit tests: machine registry CRUD and TTL expiry (41 tests, `test_registry.py`)
 - [x] Unit tests: broadcast fan-out with per-result tracking (35 tests, `test_gateway.py`)
-- [x] Unit tests: gateway CLI parsing and TLS validation (20 tests, `test_gateway_cli.py`)
+- [x] Unit tests: gateway CLI parsing and TLS validation (31 tests, `test_gateway_cli.py`)
 - [x] Unit tests: OIDC interceptor behavior (19 tests, `test_interceptor.py`)
-- **Cumulative: 281/281 tests passing** (73 Phase 1 + 208 Phase 2)
+- **Cumulative: 300/300 tests passing** (81 Phase 1 + 219 Phase 2)
 
 ### Phase 3: Client Library & UI Integration (Week 5-6) ✅ COMPLETE
-- [x] Implement `FleetClient` high-level library (`fleet_client/client.py`, 1058 lines)
+- [x] Implement `FleetClient` high-level library (`fleet_client/client.py`, 1161 lines)
 - [x] OIDC auth interceptor (`fleet_client/auth.py`, 76 lines)
 - [x] Generated gRPC stubs for all services (regenerated with HomeAxis, SendMdiCommand, LoadProgram RPCs)
 - [x] Channel caching with TTL expiry (default 300s) and thread-safe cleanup
@@ -1119,7 +1120,7 @@ fleet-ui --gateway localhost:50050
 - [x] Unit tests: fleet service wrappers (17 tests, `test_fleet_client.py` — includes home_axis, load_program)
 - [x] Unit tests: TLS channel creation (2 tests, `test_fleet_client.py`)
 - [x] Unit tests: async context manager (2 tests, `test_fleet_client.py`)
-- **Cumulative: 327/327 tests passing** (281 + 46 FleetClient)
+- **Cumulative: 346/346 tests passing** (300 + 46 FleetClient)
 
 ### Phase 4: Hardening & Packaging (Week 7-8) ✅ COMPLETE (Integration Tests + Packaging)
 - [x] Integration tests: full flow — FleetClient → Gateway → Sidecar → linuxcnc.stat (17 tests, `test_integration.py`)
@@ -1129,12 +1130,21 @@ fleet-ui --gateway localhost:50050
   - [x] `TestSidecarDirectCommands`: set_mode, home_axis, send_mdi_command, load_program, subscribe_status_stream, get_errors (6 tests)
   - [x] `TestGatewayAuthIntegration`: unauthenticated_request_rejected, viewer_cannot_broadcast (2 tests)
   - [x] `TestRegistryHeartbeat`: heartbeat_updates_last_seen, expired_machine_removed (2 tests)
-- **Cumulative: 344/344 tests passing** (327 + 17 Integration)
+- **Cumulative: 363/363 tests passing** (346 + 17 Integration)
 - All integration tests use real gRPC servers (not stubs) to exercise serialization, channel setup, auth interceptor chaining, broadcast fan-out
 - [x] Package distribution (pip wheel) — `linuxcnc-fleet` package with `[sidecar]`, `[gateway]`, `[client]`, `[dev]` extras
 - [ ] Load testing: concurrent connections, broadcast performance
 - [ ] Certificate auto-renewal support
 - [ ] Metrics/health endpoints (Prometheus / HTTP)
+
+### Phase 5: Syslog Logging ✅ COMPLETE
+- [x] Shared logging module (`linuxcnc_fleet/logging_config.py`, 77 lines)
+  - [x] Console handler with full timestamps and formatting
+  - [x] Optional syslog handler (UDP socket, configurable facility)
+  - [x] Component-tagged log records for routing
+- [x] CLI integration — `--syslog`, `--syslog-address`, `--syslog-facility` flags for sidecar and gateway
+- [x] Unit tests: logging configuration and syslog routing (16 tests, `test_logging_config.py`)
+- **Cumulative: 379/379 tests passing** (363 + 16 Syslog)
 
 ---
 

@@ -33,6 +33,8 @@ from linuxcnc_fleet.fleet_pb2 import (
     IniParamRequest,
     IniParamValue,
     ListHalRequest,
+    ListProgramsRequest,
+    ProgramList,
     MachineId,
     MachineInfo,
     MachineStatus,
@@ -57,6 +59,7 @@ _READ_ONLY_RPC = frozenset({
     "GetMachineInfo",
     "GetPosition",
     "GetIniParam",
+    "ListPrograms",
 })
 
 # Max retries for read-only RPCs
@@ -314,8 +317,8 @@ class FleetClient:
         
         Args:
             scope: Scope type - "ALL", "FACILITY", or "TAG"
-            command_type: Command type - "mdi", "execution", or "mode"
-            command_value: Command-specific value (string for MDI, int for execution/mode)
+            command_type: Command type - "mdi", "execution", "mode", or "program"
+            command_value: Command-specific value (string for MDI/program, int for execution/mode)
             facility: Facility filter (required for FACILITY scope)
             tags: Tag filter (required for TAG scope)
             
@@ -341,6 +344,8 @@ class FleetClient:
             request.mdi.command = str(command_value)
         elif command_type in ("execution", "mode"):
             request.exec.state = int(command_value) if command_type == "execution" else int(command_value)
+        elif command_type == "program":
+            request.program_path = str(command_value)
         else:
             raise ValueError(f"Unknown command type: {command_type}")
         
@@ -433,6 +438,116 @@ class FleetClient:
             facility=facility,
             tags=tags,
         )
+
+    
+    async def broadcast_load_program(
+        self,
+        scope: str,
+        path: str,
+        facility: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, tuple[bool, str]]:
+        """Broadcast loading a G-code program to multiple machines.
+
+        Args:
+            scope: Scope type - "ALL", "FACILITY", or "TAG"
+            path: Program file path to load on target machines
+            facility: Facility filter (required for FACILITY scope)
+            tags: Tag filter (required for TAG scope)
+
+        Returns:
+            Dict mapping machine_id to (success: bool, message: str)
+        """
+        return await self.broadcast_command(
+            scope=scope,
+            command_type="program",
+            command_value=path,
+            facility=facility,
+            tags=tags,
+        )
+
+    async def list_programs(
+        self,
+        machine_id: str,
+        directory: str = "",
+        max_depth: int = 0,
+    ) -> ProgramList:
+        """List available G-code programs on a machine.
+
+        Args:
+            machine_id: Target machine ID
+            directory: Directory to scan (empty = INI configured paths)
+            max_depth: Maximum directory depth (0 = unlimited)
+
+        Returns:
+            ProgramList with list of ProgramEntry objects
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+
+        try:
+            return await self._retry_read(
+                "ListPrograms",
+                lambda: self._do_list_programs(machine_id, directory, max_depth),
+            )
+        except Exception as e:
+            log.error("ListPrograms failed for %s: %s", machine_id, e)
+            raise
+
+    async def _do_list_programs(self, machine_id: str, directory: str = "", max_depth: int = 0):
+        stub = await self._get_fleet_stub(machine_id)
+        request = ListProgramsRequest(
+            id=MachineId(id=machine_id),
+            directory=directory,
+            max_depth=max_depth,
+        )
+        return await stub[0].ListPrograms(request)
+
+    async def subscribe_status(
+        self,
+        machine_id: str,
+        facility: Optional[str] = None,
+        poll_interval: float = 0.5,
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        """Stream status updates for a single machine.
+
+        Args:
+            machine_id: Target machine ID
+            facility: Optional facility filter
+            poll_interval: Poll interval in seconds
+
+        Yields:
+            Tuples of (machine_id, MachineStatus)
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+
+        try:
+            async for status in self._do_subscribe_status(machine_id):
+                yield machine_id, status
+        except grpc.aio.AioRpcError as e:
+            log.warning("Status stream error for %s: %s", machine_id, e)
+
+    async def subscribe_errors(
+        self,
+        machine_id: str,
+    ) -> AsyncGenerator[Any, None]:
+        """Stream error events for a single machine.
+
+        Args:
+            machine_id: Target machine ID
+
+        Yields:
+            ErrorEvent objects
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+
+        try:
+            async for error in self._do_subscribe_errors(machine_id):
+                yield error
+        except grpc.aio.AioRpcError as e:
+            log.warning("Error stream error for %s: %s", machine_id, e)
 
     async def subscribe_all_status(
         self,
