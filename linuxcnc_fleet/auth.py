@@ -20,6 +20,7 @@ class AuthContext:
     role: str = "viewer"
     facility: Optional[str] = None
     machine_tags: list[str] = dataclasses.field(default_factory=list)
+    authenticated: bool = True
 
 
 def _extract_token(metadata: Sequence[Tuple[str, str]]) -> Optional[str]:
@@ -57,27 +58,27 @@ class AuthInterceptor(grpc.ServerInterceptor):
         token = _extract_token(handler_request.invocation_metadata)
 
         if not token:
-            log.debug("No authorization token found in request")
-            auth_ctx = AuthContext(sub="anonymous", role="viewer")
-        else:
-            try:
-                user = self.user_extractor({"authorization": f"Bearer {token}"})
-                role = getattr(user, 'role', 'viewer')
-                if hasattr(role, 'value'):
-                    role = str(role.value)
-                else:
-                    role = str(role)
-                auth_ctx = AuthContext(
-                    sub=getattr(user, 'sub', 'unknown'),
-                    name=getattr(user, 'name', ''),
-                    email=getattr(user, 'email', ''),
-                    role=role,
-                    facility=getattr(user, 'facility', None),
-                    machine_tags=list(getattr(user, 'machine_tags', [])),
-                )
-            except Exception as e:
-                log.warning("Token validation failed: %s", e)
-                auth_ctx = AuthContext(sub="invalid", role="viewer")
+            log.warning("No authorization token found in request — rejecting")
+            return self._make_fail_handler("No authorization token provided", handler_request)
+
+        try:
+            user = self.user_extractor({"authorization": f"Bearer {token}"})
+            role = getattr(user, 'role', 'viewer')
+            if hasattr(role, 'value'):
+                role = str(role.value)
+            else:
+                role = str(role)
+            auth_ctx = AuthContext(
+                sub=getattr(user, 'sub', 'unknown'),
+                name=getattr(user, 'name', ''),
+                email=getattr(user, 'email', ''),
+                role=role,
+                facility=getattr(user, 'facility', None),
+                machine_tags=list(getattr(user, 'machine_tags', [])),
+            )
+        except Exception as e:
+            log.warning("Token validation failed — rejecting request: %s", e)
+            return self._make_fail_handler(f"Token validation failed: {e}", handler_request)
 
         original_handler_request = handler_request
         
@@ -92,6 +93,26 @@ class AuthInterceptor(grpc.ServerInterceptor):
         enhanced_request = AuthEnhancedRequest(original_handler_request, auth_ctx)
         
         return continuation(enhanced_request)
+
+    @staticmethod
+    def _make_fail_handler(message: str, handler_request) -> Any:
+        """Return a stub handler that aborts with UNAUTHENTICATED for all RPC types."""
+        if not handler_request.request_streaming and not handler_request.response_streaming:
+            def _fail(request, context):
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, message)
+            return grpc.unary_unary_rpc_method_handler(_fail)
+        elif not handler_request.request_streaming and handler_request.response_streaming:
+            def _fail_stream(request, context):
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, message)
+            return grpc.unary_stream_rpc_method_handler(_fail_stream)
+        elif handler_request.request_streaming and not handler_request.response_streaming:
+            async def _fail_unary(req_iter, context):
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, message)
+            return grpc.stream_unary_rpc_method_handler(_fail_unary)
+        else:
+            async def _fail_streaming(req_iter, context):
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, message)
+            return grpc.stream_stream_rpc_method_handler(_fail_streaming)
 
 
 class AuthDecorator:

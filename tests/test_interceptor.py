@@ -99,7 +99,7 @@ def test_auth_context_frozen():
 
 
 def test_auth_interceptor_no_token():
-    from linuxcnc_fleet.auth import AuthInterceptor, AuthContext
+    from linuxcnc_fleet.auth import AuthInterceptor
     
     mock_extractor = Mock(return_value=MockUser(sub="test-user"))
     interceptor = AuthInterceptor(mock_extractor)
@@ -107,14 +107,14 @@ def test_auth_interceptor_no_token():
     mock_continuation = Mock()
     mock_request = Mock()
     mock_request.invocation_metadata = []
+    mock_request.request_streaming = False
+    mock_request.response_streaming = False
     
     result = interceptor.intercept_service(mock_continuation, mock_request)
     
-    assert mock_continuation.called
-    enhanced_request = mock_continuation.call_args[0][0]
-    assert isinstance(enhanced_request.auth_context, AuthContext)
-    assert enhanced_request.auth_context.sub == "anonymous"
-    assert enhanced_request.auth_context.role == "viewer"
+    assert not mock_continuation.called
+    # Should return a fail handler instead of passing through to continuation
+    assert callable(result.unary_unary)
 
 
 def test_auth_interceptor_with_valid_token():
@@ -149,7 +149,7 @@ def test_auth_interceptor_with_valid_token():
 
 
 def test_auth_interceptor_with_invalid_token():
-    from linuxcnc_fleet.auth import AuthInterceptor, AuthContext
+    from linuxcnc_fleet.auth import AuthInterceptor
     
     def raise_exception(metadata):
         raise ValueError("Invalid token")
@@ -159,14 +159,50 @@ def test_auth_interceptor_with_invalid_token():
     mock_continuation = Mock()
     mock_request = Mock()
     mock_request.invocation_metadata = [("authorization", "Bearer invalid-token")]
+    mock_request.request_streaming = False
+    mock_request.response_streaming = False
     
     result = interceptor.intercept_service(mock_continuation, mock_request)
     
-    assert mock_continuation.called
-    enhanced_request = mock_continuation.call_args[0][0]
-    assert isinstance(enhanced_request.auth_context, AuthContext)
-    assert enhanced_request.auth_context.sub == "invalid"
-    assert enhanced_request.auth_context.role == "viewer"
+    assert not mock_continuation.called
+    # Should return a fail handler instead of passing through to continuation
+    assert callable(result.unary_unary)
+
+
+def test_auth_interceptor_no_token_streaming_rpc():
+    from linuxcnc_fleet.auth import AuthInterceptor
+    
+    mock_extractor = Mock(return_value=MockUser(sub="test-user"))
+    interceptor = AuthInterceptor(mock_extractor)
+    
+    mock_continuation = Mock()
+    mock_request = Mock()
+    mock_request.invocation_metadata = []
+    mock_request.request_streaming = False
+    mock_request.response_streaming = True
+    
+    result = interceptor.intercept_service(mock_continuation, mock_request)
+    
+    assert not mock_continuation.called
+    assert callable(result.unary_stream)
+
+
+def test_auth_interceptor_no_token_server_streaming():
+    from linuxcnc_fleet.auth import AuthInterceptor
+    
+    mock_extractor = Mock(return_value=MockUser(sub="test-user"))
+    interceptor = AuthInterceptor(mock_extractor)
+    
+    mock_continuation = Mock()
+    mock_request = Mock()
+    mock_request.invocation_metadata = []
+    mock_request.request_streaming = True
+    mock_request.response_streaming = False
+    
+    result = interceptor.intercept_service(mock_continuation, mock_request)
+    
+    assert not mock_continuation.called
+    assert callable(result.stream_unary)
 
 
 def test_auth_interceptor_preserves_request_attributes():
