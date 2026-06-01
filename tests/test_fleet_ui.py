@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import grpc
@@ -37,23 +37,6 @@ from linuxcnc_fleet.fleet_pb2 import (
 # ---------------------------------------------------------------------------
 # Mock FleetClient — returns real protobuf messages for coverage of helpers
 # ---------------------------------------------------------------------------
-
-@dataclass
-class _MockSubscribeStatus:
-    """Wraps an async generator to simulate a gRPC call object."""
-    _gen: AsyncGenerator
-
-    def __aiter__(self):
-        return self._gen
-
-
-@dataclass
-class _MockSubscribeAllStatus:
-    _gen: AsyncGenerator
-
-    def __aiter__(self):
-        return self._gen
-
 
 class MockFleetClient:
     """Lightweight mock that mirrors FleetClient's public API."""
@@ -227,7 +210,7 @@ class MockFleetClient:
 
     # ── Streaming subscriptions ──────────────────────────────────────
 
-    async def subscribe_status(self, machine_id):
+    def subscribe_status(self, machine_id):
         self.subscribe_status_calls.append(machine_id)
 
         async def _gen():
@@ -236,9 +219,9 @@ class MockFleetClient:
                                     estop_state=1, mode=2, joint_actual=Position(x=float(i), y=0.0, z=0.0))
                 await asyncio.sleep(0.01)
 
-        return _MockSubscribeStatus(_gen())
+        return _gen()
 
-    async def subscribe_all_status(self):
+    def subscribe_all_status(self):
         self.subscribe_all_status_calls.append(True)
 
         async def _gen():
@@ -247,7 +230,7 @@ class MockFleetClient:
                                          estop_state=1, mode=2, joint_actual=Position(x=0.0, y=0.0, z=0.0))
                 await asyncio.sleep(0.01)
 
-        return _MockSubscribeAllStatus(_gen())
+        return _gen()
 
     async def close(self):
         self._closed = True
