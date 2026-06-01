@@ -973,6 +973,14 @@ let selectedMachines = new Set();
 let lastSelectedIndex = -1;
 let eventSources = {};
 
+// ── Security Helpers ─────────────────────────────────────────────────────────
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  const div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+
 // ── Config ───────────────────────────────────────────────────────────────────
 async function connect() {
   const gateway = document.getElementById('cfg-gateway').value.trim();
@@ -1021,12 +1029,15 @@ async function refreshMachines() {
       item.setAttribute('data-index', idx);
       item.setAttribute('data-id', m.machine_id);
       item.onclick = (e) => handleMachineClick(e, m.machine_id, idx);
+      const displayName = escapeHtml(m.machine_name || m.machine_id);
+      const modeDisplay = escapeHtml(lastStatus.mode || 'unknown');
+      const estopDisplay = lastStatus.estop_state === 'E_STOPPED' ? 'E-STOP' : 'OK';
       item.innerHTML = `
-        <input type="checkbox" class="machine-checkbox" ${isChecked ? 'checked' : ''} onclick="event.stopPropagation();toggleSelect('${m.machine_id}', event)" onkeydown="event.stopPropagation()">
+        <input type="checkbox" class="machine-checkbox" ${isChecked ? 'checked' : ''} onclick="event.stopPropagation();toggleSelect('${escapeHtml(m.machine_id)}', event)" onkeydown="event.stopPropagation()">
         <div class="machine-dot ${dotClass}"></div>
         <div>
-          <div class="machine-name">${m.machine_name || m.machine_id}</div>
-          <div class="machine-detail">${lastStatus.mode || 'unknown'} · ${lastStatus.estop_state === 'E_STOPPED' ? 'E-STOP' : 'OK'}</div>
+          <div class="machine-name">${displayName}</div>
+          <div class="machine-detail">${modeDisplay} · ${estopDisplay}</div>
         </div>`;
       list.appendChild(item);
     });
@@ -1330,15 +1341,15 @@ async function broadcastLoadProgram() {
     let html = '';
     for (const [machineId, res] of Object.entries(result.results)) {
       const cls = res.success ? 'success' : 'error';
-      html += `<div class="broadcast-result-item ${cls}">${machineId}: ${res.message}</div>`;
+      html += `<div class="broadcast-result-item ${cls}">${escapeHtml(machineId)}: ${escapeHtml(res.message)}</div>`;
     }
     resultsDiv.innerHTML = html;
 
     const successCount = Object.values(result.results).filter(r => r.success).length;
     showToast(`Loaded on ${successCount}/${result.results.length} machines`, 'success');
   } catch (e) {
-    resultsDiv.innerHTML = `<div class="broadcast-result-item error">${e.message}</div>`;
-    showToast(`Broadcast failed: ${e.message}`, 'error');
+    resultsDiv.innerHTML = `<div class="broadcast-result-item error">${escapeHtml(e.message)}</div>`;
+    showToast(`Broadcast failed: ${escapeHtml(e.message)}`, 'error');
   }
 }
 
@@ -1382,15 +1393,17 @@ async function refreshProgramBrowser() {
     programs.forEach(p => {
       const sizeStr = p.size_bytes > 0 ? ` · ${formatBytes(p.size_bytes)}` : '';
       const timeStr = p.modified_time ? ` · ${new Date(p.modified_time).toLocaleString()}` : '';
-      html += `<div class="program-entry" onclick="useProgramPath('${p.path.replace(/'/g, "\\'")}')">
-        <span class="program-name">${p.name}</span>
+      const safePath = escapeHtml(p.path).replace(/'/g, "\\'");
+      const safeName = escapeHtml(p.name);
+      html += `<div class="program-entry" onclick="useProgramPath('${safePath}')">
+        <span class="program-name">${safeName}</span>
         <span class="program-meta">${sizeStr}${timeStr}</span>
       </div>`;
     });
     html += '</div>';
     document.getElementById('program-browser-content').innerHTML = html;
   } catch (e) {
-    document.getElementById('program-browser-content').innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+    document.getElementById('program-browser-content').innerHTML = `<div class="empty-state">Error: ${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -1484,7 +1497,7 @@ async function refreshErrors() {
       log.innerHTML = '<div class="empty-state">No errors</div>';
       return;
     }
-    log.innerHTML = errors.map(e => `<div class="error-entry">${e.message}</div>`).join('');
+    log.innerHTML = errors.map(e => `<div class="error-entry">${escapeHtml(e.message)}</div>`).join('');
   } catch (e) {
     console.error('refreshErrors:', e);
   }
