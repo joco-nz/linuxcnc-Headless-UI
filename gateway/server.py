@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
+
+logger = logging.getLogger(__name__)
 from concurrent import futures
 from typing import AsyncGenerator, Generator, Optional
 
@@ -397,7 +399,7 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
                     except queue.Full:
                         pass
             except Exception:
-                pass
+                logger.exception("Stream from %s failed", machine_id)
 
         threads: list[threading.Thread] = []
         for mid, client in clients:

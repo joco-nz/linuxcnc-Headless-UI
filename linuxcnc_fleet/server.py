@@ -85,7 +85,10 @@ class FleetServiceRPC(FleetServiceServicer):
         if auth_ctx is None:
             return True  # No auth configured — allow all
         
-        user_level = self.role_hierarchy.get(auth_ctx.role, 0)
+        user_level = self.role_hierarchy.get(auth_ctx.role)
+        if user_level is None:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Unknown role '{auth_ctx.role}'")
+            return False
         if user_level < 0:  # viewer or higher required
             context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Role '{auth_ctx.role}' insufficient for read operations")
             return False
@@ -97,7 +100,10 @@ class FleetServiceRPC(FleetServiceServicer):
         if auth_ctx is None:
             return True  # No auth configured — allow all
         
-        user_level = self.role_hierarchy.get(auth_ctx.role, 0)
+        user_level = self.role_hierarchy.get(auth_ctx.role)
+        if user_level is None:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Unknown role '{auth_ctx.role}'")
+            return False
         if user_level < 1:  # operator or higher required
             context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Role '{auth_ctx.role}' insufficient for control operations")
             return False
@@ -109,7 +115,10 @@ class FleetServiceRPC(FleetServiceServicer):
         if auth_ctx is None:
             return True  # No auth configured — allow all
         
-        user_level = self.role_hierarchy.get(auth_ctx.role, 0)
+        user_level = self.role_hierarchy.get(auth_ctx.role)
+        if user_level is None:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Unknown role '{auth_ctx.role}'")
+            return False
         if user_level < 2:  # programmer or higher required
             context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Role '{auth_ctx.role}' insufficient for write operations")
             return False
@@ -121,7 +130,10 @@ class FleetServiceRPC(FleetServiceServicer):
         if auth_ctx is None:
             return True  # No auth configured — allow all
         
-        user_level = self.role_hierarchy.get(auth_ctx.role, 0)
+        user_level = self.role_hierarchy.get(auth_ctx.role)
+        if user_level is None:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Unknown role '{auth_ctx.role}'")
+            return False
         if user_level < 4:  # admin required
             context.abort(grpc.StatusCode.PERMISSION_DENIED, f"Role '{auth_ctx.role}' insufficient for admin operations")
             return False
