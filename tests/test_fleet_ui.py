@@ -667,6 +667,36 @@ class TestHTTPHandlers:
         data = await resp.json()
         assert len(data) == 2
 
+    async def test_handle_mode_rejects_malformed_json(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/mode/machine-1", data="not json")
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_mdi_rejects_malformed_json(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/mdi/machine-1", data="{invalid")
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_program_rejects_malformed_json(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/program/machine-1", data="broken json]")
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_program_broadcast_rejects_malformed_json(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/programs/broadcast", data="...")
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_malformed_json(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", data="no json at all")
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
     # SSE streaming routes tested via TestSSEStream class — direct HTTP consumption
     # would block on the 120s queue timeout. The _iter_lines, send, close paths
     # are fully covered by unit tests above.

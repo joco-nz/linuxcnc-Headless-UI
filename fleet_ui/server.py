@@ -1661,7 +1661,10 @@ async def handle_mode(request: web.Request) -> web.Response:
     """Set machine mode."""
     app_state = request.app['fleet']
     machine_id = request.match_info['id']
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({'error': 'Invalid JSON'}, status=400)
     mode = body.get('mode', '').upper()
 
     result = await app_state.set_mode(machine_id, mode)
@@ -1672,7 +1675,10 @@ async def handle_mdi(request: web.Request) -> web.Response:
     """Send MDI command."""
     app_state = request.app['fleet']
     machine_id = request.match_info['id']
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({'error': 'Invalid JSON'}, status=400)
     command = body.get('command', '')
 
     result = await app_state.send_mdi(machine_id, command)
@@ -1683,7 +1689,10 @@ async def handle_program(request: web.Request) -> web.Response:
     """Load a G-code program."""
     app_state = request.app['fleet']
     machine_id = request.match_info['id']
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({'error': 'Invalid JSON'}, status=400)
     path = body.get('path', '')
 
     result = await app_state.load_program(machine_id, path)
@@ -1693,7 +1702,10 @@ async def handle_program(request: web.Request) -> web.Response:
 async def handle_program_broadcast(request: web.Request) -> web.Response:
     """Broadcast load a G-code program to multiple machines."""
     app_state = request.app['fleet']
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({'error': 'Invalid JSON'}, status=400)
     result = await app_state.broadcast_load_program(
         scope=body.get('scope', 'ALL'),
         path=body.get('path', ''),
@@ -1751,7 +1763,10 @@ async def handle_hal_write(request: web.Request) -> web.Response:
     app_state = request.app['fleet']
     machine_id = request.match_info['id']
     pin_name = request.match_info['pin']
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({'error': 'Invalid JSON'}, status=400)
 
     result = await app_state.write_hal_pin(
         machine_id, pin_name,
