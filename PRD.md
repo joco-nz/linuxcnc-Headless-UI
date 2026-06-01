@@ -412,22 +412,24 @@ viewer ──► operator ──► programmer ──► maintainer ──► ad
 
 ## 7. Test Coverage Summary
 
-**Total: 344 tests passing across 13 test files**
+**Total: 452 tests passing across 14 test files**
 
 | Phase | Component    | Test File               | Tests | Status  |
 | ----- | ------------ | ----------------------- | ----- | ------- |
 | 1     | Core Sidecar | `test_state_mapping.py` | 26    | Passing |
 | 1     | Core Sidecar | `test_snapshot.py`      | 7     | Passing |
 | 1     | Core Sidecar | `test_sidecar.py`       | 22    | Passing |
-| 1     | CLI          | `test_cli.py`           | 18    | Passing |
+| 1     | CLI          | `test_cli.py`           | 26    | Passing |
 | 2     | Auth         | `test_auth.py`          | 31    | Passing |
 | 2     | Policies     | `test_policies.py`      | 62    | Passing |
 | 2     | Registry     | `test_registry.py`      | 41    | Passing |
-| 2     | Gateway      | `test_gateway.py`       | 35    | Passing |
-| 2     | Gateway CLI  | `test_gateway_cli.py`   | 20    | Passing |
-| 2     | Interceptor  | `test_interceptor.py`   | 19    | Passing |
+| 2     | Gateway      | `test_gateway.py`       | 36    | Passing |
+| 2     | Gateway CLI  | `test_gateway_cli.py`   | 31    | Passing |
+| 2     | Interceptor  | `test_interceptor.py`   | 21    | Passing |
 | 3     | FleetClient  | `test_fleet_client.py`  | 46    | Passing |
 | 4     | Integration  | `test_integration.py`   | 17    | Passing |
+| 5     | Syslog       | `test_logging_config.py`| 16    | Passing |
+| 6     | FleetUI      | `test_fleet_ui.py`      | 70    | Passing |
 
 ---
 
@@ -439,43 +441,45 @@ linuxcnc-fleet/
 │   └── fleet.proto              # gRPC service definition (354 lines, 2 services, 30+ messages)
 ├── linuxcnc_fleet/
 │   ├── __init__.py
-│   ├── headless.py              # LinuxCncSidecar class — polling loop, state mapping (~699 lines)
-│   ├── server.py                # gRPC server creation + FleetServiceServicer (~435 lines)
-│   ├── cli.py                   # CLI entry point: headless-server (148 lines)
-│   ├── auth.py                  # Server-side mTLS/OIDC interceptor (~146 lines)
+│   ├── headless.py              # LinuxCncSidecar class — polling loop, state mapping (753 lines)
+│   ├── server.py                # gRPC server creation + FleetServiceServicer (484 lines)
+│   ├── cli.py                   # CLI entry point: headless-server (167 lines)
+│   ├── auth.py                  # Server-side mTLS/OIDC interceptor (167 lines)
 │   ├── fleet_pb2.py             # Generated protobuf messages
 │   ├── fleet_pb2_grpc.py        # Generated gRPC stubs
 │   └── proto/                   # Proto source copy for package distribution
 ├── gateway/
 │   ├── __init__.py
-│   ├── server.py                # FleetGatewayService RPC handlers (~488 lines)
-│   ├── auth.py                  # OIDC token validation (HS256 + RS256 via JWKS) (234 lines)
-│   ├── policies.py              # RBAC policy engine with role hierarchy (303 lines)
+│   ├── server.py                # FleetGatewayService RPC handlers + logging (525 lines)
+│   ├── auth.py                  # OIDC token validation (HS256 + RS256 via JWKS) (250 lines)
+│   ├── policies.py              # RBAC policy engine with role hierarchy (315 lines)
 │   ├── registry.py              # Machine registry with TTL heartbeat expiry (206 lines)
-│   └── cli.py                   # Gateway CLI entry point: fleet-gateway (~144 lines)
+│   └── cli.py                   # Gateway CLI entry point: fleet-gateway (174 lines)
 ├── fleet_client/
 │   ├── __init__.py
-│   ├── client.py                # FleetClient high-level library (~1058 lines)
-│   └── auth.py                  # OIDC bearer auth gRPC interceptor (~60 lines)
+│   ├── client.py                # FleetClient high-level library (1173 lines)
+│   └── auth.py                  # OIDC bearer auth gRPC interceptor (92 lines)
 ├── fleet_ui/
 │   ├── __init__.py
-│   └── server.py                # aiohttp web dashboard with SSE streaming (1500+ lines, includes HTML)
+│   └── server.py                # aiohttp web dashboard with SSE streaming (1903 lines, includes HTML)
 ├── tests/
 │   ├── conftest.py              # Shared mock fixtures (linuxcnc, _hal, gRPC servers)
 │   ├── test_state_mapping.py    # State enum mapping correctness (26 tests)
 │   ├── test_snapshot.py         # Snapshot immutability & atomic swap (7 tests)
 │   ├── test_sidecar.py          # Control command error paths (22 tests)
-│   ├── test_cli.py              # CLI argument parsing (18 tests)
+│   ├── test_cli.py              # CLI argument parsing (26 tests)
 │   ├── test_auth.py             # OIDC token parsing + expiration (31 tests)
 │   ├── test_policies.py         # RBAC policy evaluation (62 tests)
 │   ├── test_registry.py         # Machine registry CRUD + TTL expiry (41 tests)
-│   ├── test_gateway.py          # Gateway RPC handlers + broadcast fan-out (35 tests)
-│   ├── test_gateway_cli.py      # Gateway CLI parsing (20 tests)
-│   ├── test_interceptor.py      # mTLS/OIDC interceptor behavior (19 tests)
+│   ├── test_gateway.py          # Gateway RPC handlers + broadcast fan-out + thread cleanup (36 tests)
+│   ├── test_gateway_cli.py      # Gateway CLI parsing (31 tests)
+│   ├── test_interceptor.py      # mTLS/OIDC interceptor behavior (21 tests)
 │   ├── test_fleet_client.py     # FleetClient routing, streaming, retry (46 tests)
+│   ├── test_logging_config.py   # Syslog logging configuration (16 tests)
+│   ├── test_fleet_ui.py         # FleetUI dashboard HTTP handlers + SSE streaming + XSS protections (70 tests)
 │   └── test_integration.py      # Full flow: FleetClient → Gateway → Sidecar (17 tests)
-├── scripts/                     # Deployment scripts (deferred)
-├── certs/                       # TLS certificates (git-ignored)
+├── scripts/                     # Deployment scripts (setup-single-machine.sh, verify.py, single-machine.md)
+├── certs/                       # TLS certificates (not yet created; git-ignored via *.pem, *.key, *.crt)
 ├── pyproject.toml               # Package definition + dependencies
 ├── README.md                    # Project overview and usage guide
 ├── headless_ui.md               # Full architecture plan & design document

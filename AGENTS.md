@@ -8,22 +8,26 @@
 
 ## Current State
 
-**Phase 1: Core Sidecar is complete.** The sidecar component (proto, LinuxCncSidecar, gRPC server, CLI) is implemented with 73/73 unit tests passing.
+**Phase 1: Core Sidecar is complete.** The sidecar component (proto, LinuxCncSidecar, gRPC server, CLI) is implemented with 81/81 unit tests passing.
 
-**Phase 2: Gateway & Auth is complete.** The gateway package (auth, policies, registry, server, CLI) and mTLS interceptor are implemented with 208/208 unit tests passing.
+**Phase 2: Gateway & Auth is complete.** The gateway package (auth, policies, registry, server, CLI) and mTLS interceptor are implemented with 222/222 unit tests passing.
 
 **Phase 3: FleetClient is complete.** The client library (OIDC auth interceptor, FleetClient with all RPC wrappers, retry logic, streaming subscriptions) is implemented with 46/46 unit tests passing.
 
 **Phase 4: Integration Tests are complete.** Full flow tests (FleetClient → Gateway → Sidecar) with 17/17 tests passing.
 
-**Total: 344/344 tests passing**
+**Phase 5: Syslog Logging is complete.** Shared logging module with syslog support and CLI integration with 16/16 unit tests passing.
+
+**Phase 6: FleetUI Dashboard is complete.** aiohttp web dashboard with SSE streaming, HTML/CSS UI, and XSS protections with 70/70 unit tests passing.
+
+**Total: 452/452 tests passing**
 
 ## Phase 3 Deliverables
 
 | Component        | Files                                 | Tests                     | Status |
 | ---------------- | ------------------------------------- | ------------------------- | ------ |
-| Auth interceptor | `fleet_client/auth.py` (76 lines)     | —                         | ✅      |
-| FleetClient      | `fleet_client/client.py` (1058 lines) | 46 (test_fleet_client.py) | ✅      |
+| Auth interceptor | `fleet_client/auth.py` (92 lines)     | —                         | ✅      |
+| FleetClient      | `fleet_client/client.py` (1173 lines) | 46 (test_fleet_client.py) | ✅      |
 
 ### Key implementation notes
 
@@ -57,7 +61,7 @@
   - Missing `FleetServiceStub` import in `gateway/server.py` (caused streaming to fail silently)
   - Added `context.is_active()` check in `SubscribeAllStatus` to prevent hanging on client disconnect
   - Mock `estop_state` default changed from `ESTOP_ACK` to `0` in conftest (was blocking mode-change RPCs)
-- All tests pass: 344 total (73 Phase 1 + 208 Phase 2 + 46 FleetClient + 17 Integration)
+- All tests pass: 363 total (81 Phase 1 + 222 Phase 2 + 46 FleetClient + 17 Integration)
 
 ### Fixed Known Issues
 
@@ -75,8 +79,8 @@ Read `headless_ui.md` before making any changes. It defines:
 
 - The full gRPC protocol (`fleet.proto` — see the Protocol Definition section)
 - The Python stack: grpcio, protobuf, linuxcnc/_hal modules (already on target machines)
-- Three components: **sidecar** (`linuxcnc_fleet/`), **gateway** (`gateway/`), **client** (`fleet_client/`)
-- 4 implementation phases (Weeks 1–8). Respect this order unless told otherwise.
+- Four components: **sidecar** (`linuxcnc_fleet/`), **gateway** (`gateway/`), **client** (`fleet_client/`), **dashboard** (`fleet_ui/`)
+- 6 implementation phases (Weeks 1–12). Respect this order unless told otherwise.
 - The file layout target (line 728) — use it as the directory structure template.
 
 ## Phase 1 Deliverables
@@ -84,9 +88,9 @@ Read `headless_ui.md` before making any changes. It defines:
 | Component     | Files                                                                   | Tests                                                                    | Status |
 | ------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------ |
 | Proto + stubs | `proto/fleet.proto`, `linuxcnc_fleet/fleet_pb2.py`, `fleet_pb2_grpc.py` | —                                                                        | ✅      |
-| Sidecar       | `linuxcnc_fleet/headless.py` (699 lines)                                | 26 (test_state_mapping.py) + 7 (test_snapshot.py) + 22 (test_sidecar.py) | ✅      |
-| gRPC server   | `linuxcnc_fleet/server.py` (435 lines)                                  | —                                                                        | ✅      |
-| CLI           | `linuxcnc_fleet/cli.py` (148 lines)                                     | 18 (test_cli.py)                                                         | ✅      |
+| Sidecar       | `linuxcnc_fleet/headless.py` (753 lines)                                | 26 (test_state_mapping.py) + 7 (test_snapshot.py) + 22 (test_sidecar.py) | ✅      |
+| gRPC server   | `linuxcnc_fleet/server.py` (484 lines)                                  | —                                                                        | ✅      |
+| CLI           | `linuxcnc_fleet/cli.py` (167 lines)                                     | 26 (test_cli.py)                                                         | ✅      |
 | Test infra    | `tests/conftest.py` (mock linuxcnc/_hal via pytest_configure)           |                                                                          | ✅      |
 
 ### Key implementation notes
@@ -100,12 +104,12 @@ Read `headless_ui.md` before making any changes. It defines:
 
 | Component          | Files                                | Tests                    | Status |
 | ------------------ | ------------------------------------ | ------------------------ | ------ |
-| Auth module        | `gateway/auth.py` (234 lines)        | 31 (test_auth.py)        | ✅      |
-| Policy engine      | `gateway/policies.py` (303 lines)    | 62 (test_policies.py)    | ✅      |
+| Auth module        | `gateway/auth.py` (250 lines)        | 31 (test_auth.py)        | ✅      |
+| Policy engine      | `gateway/policies.py` (315 lines)    | 62 (test_policies.py)    | ✅      |
 | Registry           | `gateway/registry.py` (206 lines)    | 41 (test_registry.py)    | ✅      |
-| Gateway server     | `gateway/server.py` (488 lines)      | 35 (test_gateway.py)     | ✅      |
-| Gateway CLI        | `gateway/cli.py` (144 lines)         | 20 (test_gateway_cli.py) | ✅      |
-| mTLS interceptor   | `linuxcnc_fleet/auth.py` (146 lines) | 19 (test_interceptor.py) | ✅      |
+| Gateway server     | `gateway/server.py` (525 lines)      | 36 (test_gateway.py)     | ✅      |
+| Gateway CLI        | `gateway/cli.py` (174 lines)         | 31 (test_gateway_cli.py) | ✅      |
+| mTLS interceptor   | `linuxcnc_fleet/auth.py` (167 lines) | 21 (test_interceptor.py) | ✅      |
 | Server auth wiring | `linuxcnc_fleet/server.py` (updated) | —                        | ✅      |
 | CLI auth wiring    | `linuxcnc_fleet/cli.py` (updated)    | —                        | ✅      |
 
@@ -115,7 +119,7 @@ Read `headless_ui.md` before making any changes. It defines:
 - mTLS interceptor uses callable-based user_extractor (decoupled from specific AuthManager)
 - FleetServiceRPC checks auth context for control/write/admin operations via role hierarchy
 - Gateway CLI validates args before starting server, exits with code 1 on validation errors
-- All tests pass: 208 total (73 Phase 1 + 208 Phase 2)
+- All tests pass: 303 total (81 Phase 1 + 222 Phase 2)
 
 ## When Implementing Phase 2+
 
@@ -145,23 +149,29 @@ pip install "linuxcnc-fleet[dev]"       # dev tools (pytest, mypy)
 
 - `headless-server` → `linuxcnc_fleet.cli:main`
 - `fleet-gateway` → `gateway.cli:main`
+- `fleet-ui` → `fleet_ui.server:main`
 
 ### Proto code generation
 
+Run from project root:
+
 ```bash
-python -m grpc_tools.protoc -I. \
+python -m grpc_tools.protoc -Iproto \
     --python_out=linuxcnc_fleet \
     --grpc_python_out=linuxcnc_fleet \
-    proto/fleet.proto
+    fleet.proto
 # Then fix imports: sed -i 's/^import fleet_pb2 as/import linuxcnc_fleet.fleet_pb2 as/' linuxcnc_fleet/fleet_pb2_grpc.py
 ```
 
-The generated `fleet_pb2_grpc.py` uses top-level imports (`import fleet_pb2`) which break when installed as a package. A post-generation sed fix is required to change it to `import linuxcnc_fleet.fleet_pb2`.
+Key points:
+- `-Iproto` (not `-I.`) — the include path must point to the proto directory, and input is just `fleet.proto`
+- Output goes into `linuxcnc_fleet/` directly (not `linuxcnc_fleet/proto/`)
+- The generated `fleet_pb2_grpc.py` uses top-level imports (`import fleet_pb2`) which break when installed as a package. A post-generation sed fix is required to change it to `import linuxcnc_fleet.fleet_pb2`.
 
 ## Setup Notes
 
 - Project uses `pyproject.toml` with dependencies: grpcio>=1.60.0, protobuf>=4.25.0 (core), grpcio-tools>=1.60.0 (optional)
-- Entry points: `headless-server`, `fleet-gateway`
+- Entry points: `headless-server`, `fleet-gateway`, `fleet-ui`
 - Run tests: `python -m pytest tests/ -v`
 - Build distributions: `python -m build` (produces sdist + wheel in `dist/`)
 - Target machines need: LinuxCNC installed, Python 3.10+, the `linuxcnc` and `_hal` C extensions (bundled with LinuxCNC).

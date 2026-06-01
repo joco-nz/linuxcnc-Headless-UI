@@ -883,32 +883,32 @@ Key implementation details:
 ```
 linuxcnc-fleet/
 ├── proto/
-│   └── fleet.proto              # gRPC service definition (all RPCs + messages) — 354 lines
+│   └── fleet.proto              # gRPC service definition (all RPCs + messages) — 375 lines, 27 RPCs
 ├── linuxcnc_fleet/
 │   ├── __init__.py
 │   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module — 753 lines
-│   ├── server.py                # gRPC server per instance + FleetServiceRPC — 459 lines
+│   ├── server.py                # gRPC server per instance + FleetServiceRPC with role hierarchy checks — 484 lines
 │   ├── cli.py                   # CLI entry point: headless-server --ini ... + OIDC args (--jwt-secret, --jwks-url, --issuer, --audience) — 167 lines
-│   └── auth.py                  # mTLS/OIDC interceptor for FleetService (AuthContext, AuthInterceptor, AuthDecorator) — 146 lines
+│   └── auth.py                  # mTLS/OIDC interceptor for FleetService (AuthContext, AuthInterceptor, AuthDecorator) — 167 lines
 ├── gateway/
 │   ├── __init__.py
-│   ├── server.py                # FleetGatewayService implementation + helper methods — 492 lines
-│   ├── auth.py                  # OIDC token validation + user extraction — 234 lines
+│   ├── server.py                # FleetGatewayService implementation + helper methods + thread-safe streaming — 525 lines
+│   ├── auth.py                  # OIDC token validation + user extraction + test secret key (env var) — 250 lines
 │      # AuthManager, User dataclass, extract_user(), validate_token(), _parse_claims()
 │      # create_test_auth_manager(), create_test_token(), clear_jwks_cache()
-│   ├── policies.py              # RBAC policy engine — 311 lines
+│   ├── policies.py              # RBAC policy engine with role hierarchy — 315 lines
 │   ├── registry.py              # Machine registration + discovery store — 206 lines
 │   └── cli.py                   # Gateway CLI entry point: fleet-gateway — validate_args() requires auth config — 174 lines
 ├── fleet_client/
 │   ├── __init__.py
-│   ├── client.py                # FleetClient high-level library (28+ public methods) — 1161 lines
+│   ├── client.py                # FleetClient high-level library (28+ public methods) — 1173 lines
 │      # Gateway RPC wrappers: get_machines, route_machine, broadcast_command/mode/execution/mdi, subscribe_all_status
 │      # FleetService wrappers: all 21 RPCs as async methods + 3 streaming subscriptions
 │      # _CachedChannel with TTL, lazy cleanup, _retry_read(), test injection params
-│   └── auth.py                  # OIDC bearer auth interceptor (BearerAuthInterceptor, _ClientCallDetails) — 76 lines
-├── fleet_ui/                    # Central UI package (not yet implemented)
+│   └── auth.py                  # OIDC bearer auth interceptor (BearerAuthInterceptor, _ClientCallDetails) — 92 lines
+├── fleet_ui/                    # Central web dashboard with SSE streaming
 │   ├── __init__.py
-│   └── server.py                # fleet-ui entry point (deferred)
+│   └── server.py                # aiohttp web dashboard — single-page HTML, SSE streams, XSS protections (~1903 lines)
 ├── tests/
 │   ├── conftest.py              # Shared mock fixtures (linuxcnc, _hal, gRPC servers)
 │   ├── test_state_mapping.py    # Phase 1: state mapping correctness (26 tests)
@@ -918,11 +918,12 @@ linuxcnc-fleet/
 │   ├── test_auth.py             # Phase 2: OIDC token parsing + expiration (31 tests)
 │   ├── test_policies.py         # Phase 2: RBAC policy evaluation (62 tests)
 │   ├── test_registry.py         # Phase 2: machine registry CRUD + TTL expiry (41 tests)
-│   ├── test_gateway.py          # Phase 2: broadcast fan-out (35 tests)
+│   ├── test_gateway.py          # Phase 2: broadcast fan-out + thread cleanup (36 tests)
 │   ├── test_gateway_cli.py      # Phase 2: gateway CLI parsing (31 tests)
-│   ├── test_interceptor.py      # Phase 2: OIDC interceptor behavior (19 tests)
+│   ├── test_interceptor.py      # Phase 2: OIDC interceptor behavior (21 tests)
 │   ├── test_fleet_client.py     # Phase 3: FleetClient routing, streaming, retry (46 tests)
 │   ├── test_logging_config.py   # Phase 5: syslog logging configuration (16 tests)
+│   ├── test_fleet_ui.py         # Phase 6: FleetUI dashboard HTTP handlers + SSE streaming + XSS protections (70 tests)
 │   └── test_integration.py      # Phase 4: full flow integration (17 tests)
 ├── scripts/
 │   ├── single-machine.md        # Single machine setup guide
@@ -963,9 +964,9 @@ Key classes in `linuxcnc_fleet/auth.py`:
 - `grpcio`, `protobuf`
 - Generated stubs from `fleet.proto`
 
-### UI (`fleet_ui/`) — Not Yet Implemented
-- `aiohttp>=3.9.0` (HTTP server for central UI)
-- Entry point: `fleet-ui = "fleet_ui.server:main"` (defined in pyproject.toml, implementation deferred)
+### UI (`fleet_ui/`)
+- `aiohttp>=3.9.0` (HTTP server for central UI with SSE streaming)
+- Entry point: `fleet-ui = "fleet_ui.server:main"` (implemented — single-page HTML dashboard with machine list, status cards, controls, HAL pins table, error log)
 
 ### Build Tools
 - `protoc` + `grpcio-tools` for code generation
@@ -1018,8 +1019,13 @@ fleet-gateway --port 50050 \
     --key /etc/linuxcnc-fleet/gateway-key.pem \
     --root-cert /etc/linuxcnc-fleet/ca.pem
 
-# 2. Run central UI (separate process — not yet implemented)
-fleet-ui --gateway localhost:50050
+# 2. Run central UI (aiohttp web server with SSE streaming)
+fleet-ui --gateway localhost:50050 --port 8080
+
+# With TLS for the dashboard:
+fleet-ui --gateway localhost:50050 --port 8443 \
+    --tls-cert /etc/linuxcnc-fleet/dashboard.pem \
+    --tls-key /etc/linuxcnc-fleet/dashboard-key.pem
 ```
 
 ---
@@ -1146,6 +1152,19 @@ fleet-ui --gateway localhost:50050
 - [x] Unit tests: logging configuration and syslog routing (16 tests, `test_logging_config.py`)
 - **Cumulative: 379/379 tests passing** (363 + 16 Syslog)
 
+### Phase 6: FleetUI Dashboard ✅ COMPLETE
+- [x] aiohttp web dashboard (`fleet_ui/server.py`, ~1903 lines including HTML/CSS/JS)
+- [x] SSE streaming for real-time status updates (`/api/stream/status/{id}`, `/api/stream/all`)
+- [x] Machine list sidebar with color-coded status indicators (green=running, yellow=paused, gray=stopped, red=E-stop)
+- [x] Tabbed detail view per machine: Status cards, Controls, HAL Pins table, Error log
+- [x] Program browser and broadcast controls
+- [x] XSS protections — all API data escaped via `escapeHtml()` before innerHTML insertion
+- [x] Toast notifications for command results
+- [x] TLS support for the dashboard itself (`--tls-cert`, `--tls-key` flags)
+- [x] JSON error handling on HTTP handlers (400 Bad Request for malformed bodies)
+- [x] Unit tests: HTTP handlers, SSE streaming, XSS protections (70 tests, `test_fleet_ui.py`)
+- **Cumulative: 452/452 tests passing** (379 + 70 FleetUI)
+
 ---
 
 ## Known Issues
@@ -1158,7 +1177,11 @@ All previously documented bugs have been fixed:
 | 2 | `linuxcnc_fleet/cli.py` | `AuthManager(secret=...)` → `AuthManager(secret_key=...)` | High | ✅ Fixed |
 | 3 | `fleet_client/client.py` | `_get_or_create_machine_channel()` insecure channel when `tls_enabled=True` | Medium | ✅ Fixed |
 
-No remaining known issues.
+### Code Review Anomalies (non-blocking)
+
+| # | Severity | Type | Location | Notes |
+|---|----------|------|----------|-------|
+| 4 | Low | Auth bypass when unconfigured | `linuxcnc_fleet/server.py:86,98,110,122` | All ops return `True` (allow all) when auth is not configured — design decision for dev environments |
 
 ---
 

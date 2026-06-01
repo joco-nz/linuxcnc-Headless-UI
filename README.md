@@ -278,11 +278,11 @@ Test breakdown by phase:
 
 | Phase | Component | Tests | Status |
 |-------|-----------|-------|--------|
-| 1 | Core Sidecar | 73 | Passing |
-| 2 | Gateway & Auth | 208 | Passing |
+| 1 | Core Sidecar | 81 | Passing |
+| 2 | Gateway & Auth | 219 | Passing |
 | 3 | FleetClient | 46 | Passing |
 | 4 | Integration | 17 | Passing |
-| 5 | Syslog Logging | 35 | Passing |
+| 5 | Syslog Logging | 16 | Passing |
 
 ## License
 
