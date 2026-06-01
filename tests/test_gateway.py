@@ -77,6 +77,27 @@ class TestGrpcClient:
         client.close()
         assert client._channel is None
 
+    def test_connect_concurrent_threads_same_channel(self):
+        import threading
+
+        client = _GrpcClient("192.168.1.10", 5007)
+        results: list[grpc.Channel] = []
+        lock = threading.Lock()
+
+        def connect_and_collect():
+            ch = client.connect()
+            with lock:
+                results.append(ch)
+
+        threads = [threading.Thread(target=connect_and_collect) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(results) == 10
+        assert all(ch is results[0] for ch in results)
+
 
 class TestGatewayServiceServicer:
     """Tests for GatewayServiceServicer RPC implementations."""

@@ -59,6 +59,7 @@ class _GrpcClient:
         self._key_file = key_file
         self._root_cert_file = root_cert_file
         self._channel: Optional[grpc.Channel] = None
+        self._connect_lock = threading.Lock()
 
     def _build_credentials(self) -> grpc.ChannelCredentials:
         if not self._tls_enabled or not self._cert_file:
@@ -74,19 +75,21 @@ class _GrpcClient:
         return grpc.ssl_channel_credentials(None, private_key, cert)
 
     def connect(self) -> grpc.Channel:
-        if self._channel is None:
-            target = f"{self._address}:{self._port}"
-            creds = self._build_credentials()
-            if creds:
-                self._channel = grpc.secure_channel(target, creds)
-            else:
-                self._channel = grpc.insecure_channel(target)
-        return self._channel
+        with self._connect_lock:
+            if self._channel is None:
+                target = f"{self._address}:{self._port}"
+                creds = self._build_credentials()
+                if creds:
+                    self._channel = grpc.secure_channel(target, creds)
+                else:
+                    self._channel = grpc.insecure_channel(target)
+            return self._channel
 
     def close(self) -> None:
-        if self._channel is not None:
-            self._channel.close()
-            self._channel = None
+        with self._connect_lock:
+            if self._channel is not None:
+                self._channel.close()
+                self._channel = None
 
 
 class GatewayServiceServicer(FleetGatewayServiceServicer):
