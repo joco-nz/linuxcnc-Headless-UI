@@ -301,3 +301,207 @@ class TestAuthManager:
         token = jwt.encode(payload, "some-secret-key-for-testing-32bytes!!!", algorithm="HS256")
         with pytest.raises(TokenValidationError, match="No secret key"):
             auth.validate_token(token)
+
+
+class TestJWKSErrorPaths:
+    """Tests for JWKS error paths in AuthManager."""
+
+    @staticmethod
+    def _make_rsa_jwk(private_key):
+        from cryptography.hazmat.primitives import serialization
+        import base64
+
+        public_key = private_key.public_key()
+        public_numbers = public_key.public_numbers()
+
+        def encode_jwk_base64(value):
+            return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+        n_bytes = public_numbers.n.to_bytes(
+            (public_numbers.n.bit_length() + 7) // 8, "big"
+        )
+        e_bytes = public_numbers.e.to_bytes(
+            (public_numbers.e.bit_length() + 7) // 8, "big"
+        )
+
+        return {
+            "kty": "RSA",
+            "kid": "test-key-1",
+            "n": encode_jwk_base64(n_bytes),
+            "e": encode_jwk_base64(e_bytes),
+        }
+
+    @staticmethod
+    def _generate_rsa_keys():
+        from cryptography.hazmat.primitives.asymmetric import rsa as rsa_primitives
+        from cryptography.hazmat.primitives import serialization
+
+        private_key = rsa_primitives.generate_private_key(public_exponent=65537, key_size=2048)
+        public_key = private_key.public_key()
+        pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return private_key, pem.decode("utf-8")
+
+    def test_rs256_no_jwks_url(self):
+        """RS256 token fails when JWKS URL is not configured."""
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            algorithms=["RS256"],
+        )
+        private_key, public_pem = self._generate_rsa_keys()
+        payload = {
+            "exp": int(time.time()) + 3600,
+            "iss": "https://test.example.com",
+            "aud": "fleet",
+            "sub": "user-1",
+        }
+        token = jwt.encode(payload, private_key, algorithm="RS256", headers={"kid": "test-key-1"})
+        with pytest.raises(TokenValidationError, match="JWKS URL not configured"):
+            auth.validate_token(token)
+
+    def test_no_matching_kid(self):
+        """Token with unknown kid raises TokenValidationError."""
+        private_key, public_pem = self._generate_rsa_keys()
+        jwk = self._make_rsa_jwk(private_key)
+        jwks_data = {"keys": [jwk]}
+
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            jwks_url="https://example.com/.well-known/jwks.json",
+            algorithms=["RS256"],
+        )
+        auth._jwks_cache = jwks_data
+        auth._jwks_expires_at = time.time() + 300
+
+        payload = {
+            "exp": int(time.time()) + 3600,
+            "iss": "https://test.example.com",
+            "aud": "fleet",
+            "sub": "user-1",
+        }
+        token = jwt.encode(payload, private_key, algorithm="RS256", headers={"kid": "unknown-key"})
+        with pytest.raises(TokenValidationError, match="No signing key found"):
+            auth.validate_token(token)
+
+    def test_non_rsa_key_type(self):
+        """Non-RSA key type in JWKS raises TokenValidationError."""
+        ec_jwk = {
+            "kty": "EC",
+            "kid": "ec-key-1",
+            "crv": "P-256",
+            "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+            "y": "x_FEzRu9mW6HLZLdNtwSBZPThXpsFwHFzeV1k2iiUwg",
+        }
+
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            jwks_url="https://example.com/.well-known/jwks.json",
+            algorithms=["RS256"],
+        )
+        auth._jwks_cache = {"keys": [ec_jwk]}
+        auth._jwks_expires_at = time.time() + 300
+
+        private_key, public_pem = self._generate_rsa_keys()
+        payload = {
+            "exp": int(time.time()) + 3600,
+            "iss": "https://test.example.com",
+            "aud": "fleet",
+            "sub": "user-1",
+        }
+        token = jwt.encode(payload, private_key, algorithm="RS256", headers={"kid": "ec-key-1"})
+        with pytest.raises(TokenValidationError, match="Unsupported key type"):
+            auth.validate_token(token)
+
+    def test_jwks_fetch_http_error(self):
+        """JWKS fetch raises on HTTP error from network."""
+        import urllib.error
+
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            jwks_url="https://example.com/.well-known/jwks.json",
+            algorithms=["RS256"],
+        )
+
+        http_error = urllib.error.HTTPError(
+            "https://example.com/.well-known/jwks.json",
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+        with pytest.raises(urllib.error.URLError):
+            auth._fetch_jwks()
+
+    def test_jwks_cache_hit(self):
+        """Second JWKS fetch returns cached data without network call."""
+        private_key, public_pem = self._generate_rsa_keys()
+        jwk = self._make_rsa_jwk(private_key)
+        jwks_data = {"keys": [jwk]}
+
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            jwks_url="https://example.com/.well-known/jwks.json",
+            algorithms=["RS256"],
+        )
+        auth._jwks_cache = jwks_data
+        auth._jwks_expires_at = time.time() + 300
+
+        result1 = auth._fetch_jwks()
+        result2 = auth._fetch_jwks()
+
+        assert result1 is result2
+        assert result1 == jwks_data
+
+    def test_rs256_no_kid_uses_first_key(self):
+        """RS256 token with no kid uses first matching key from JWKS."""
+        private_key, public_pem = self._generate_rsa_keys()
+        jwk = self._make_rsa_jwk(private_key)
+        jwks_data = {"keys": [jwk]}
+
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            jwks_url="https://example.com/.well-known/jwks.json",
+            algorithms=["RS256"],
+        )
+        auth._jwks_cache = jwks_data
+        auth._jwks_expires_at = time.time() + 300
+
+        payload = {
+            "exp": int(time.time()) + 3600,
+            "iss": "https://test.example.com",
+            "aud": "fleet",
+            "sub": "user-1",
+        }
+        token = jwt.encode(payload, private_key, algorithm="RS256")
+        user = auth.validate_token(token)
+        assert user.sub == "user-1"
+
+    def test_jwks_missing_keys_field(self):
+        """JWKS without 'keys' field results in no matching keys."""
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            jwks_url="https://example.com/.well-known/jwks.json",
+            algorithms=["RS256"],
+        )
+        auth._jwks_cache = {"some_other_field": "value"}
+        auth._jwks_expires_at = time.time() + 300
+
+        private_key, public_pem = self._generate_rsa_keys()
+        payload = {
+            "exp": int(time.time()) + 3600,
+            "iss": "https://test.example.com",
+            "aud": "fleet",
+            "sub": "user-1",
+        }
+        token = jwt.encode(payload, private_key, algorithm="RS256")
+        with pytest.raises(TokenValidationError, match="No signing key found"):
+            auth.validate_token(token)

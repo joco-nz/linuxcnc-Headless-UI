@@ -174,11 +174,13 @@ def pytest_configure(config):
 
 
 def pytest_runtest_setup(item):
-    """Clean up logging handlers before each test to prevent cross-test pollution.
+    """Clean up logging handlers and reset shared mocks between tests.
 
     Some tests (e.g., syslog config tests) add MagicMock handlers to root.handlers
     that can leak into subsequent tests and cause TypeError when Python's logging
     tries to compare record.levelno >= handler.level (int vs MagicMock).
+
+    Also resets the linuxcnc/_hal mock state to prevent cross-test pollution.
     """
     import logging
 
@@ -188,6 +190,13 @@ def pytest_runtest_setup(item):
         except (OSError, ValueError):
             pass
         logging.root.removeHandler(handler)
+
+    # Reset shared mocks used by headless.py tests
+    for mod_name in ("linuxcnc", "_hal"):
+        if mod_name in sys.modules:
+            mod = sys.modules[mod_name]
+            if hasattr(mod, "reset_mock"):
+                mod.reset_mock()
 
 
 def pytest_unconfigure(config):
