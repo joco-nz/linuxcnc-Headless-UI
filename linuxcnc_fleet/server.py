@@ -149,6 +149,8 @@ class FleetServiceRPC(FleetServiceServicer):
     ) -> Generator[MachineStatus, None, None]:
         import time as _time
         while True:
+            if not context.is_active():
+                return
             yield self.sidecar.get_status()
             _time.sleep(0.02)
 
@@ -277,7 +279,7 @@ class FleetServiceRPC(FleetServiceServicer):
     ) -> Generator[HalPinUpdate, None, None]:
         updates = self.sidecar.subscribe_hal_pins(request.pin_names, request.poll_interval_seconds)
         for update in updates:
-            if not self.sidecar._running:
+            if not self.sidecar._running or not context.is_active():
                 return
             yield update
 
@@ -292,7 +294,7 @@ class FleetServiceRPC(FleetServiceServicer):
     ) -> Generator[ErrorEvent, None, None]:
         events = self.sidecar.subscribe_errors()
         for event in events:
-            if not self.sidecar._running:
+            if not self.sidecar._running or not context.is_active():
                 return
             yield event
 
@@ -341,13 +343,13 @@ class GatewayServiceRPC(FleetGatewayServiceServicer):
         self, request: DiscoverRequest, context: grpc.ServicerContext
     ) -> MachineList:
         user = self._validate_auth(context)
-        if user is not None:
+        if user is None:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         return MachineList()
 
     def RouteMachine(self, request: MachineId, context: grpc.ServicerContext) -> GatewayRoute:
         user = self._validate_auth(context)
-        if user is not None:
+        if user is None:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         return GatewayRoute()
 
@@ -355,7 +357,7 @@ class GatewayServiceRPC(FleetGatewayServiceServicer):
         self, request: BroadcastRequest, context: grpc.ServicerContext
     ) -> BroadcastResult:
         user = self._validate_auth(context)
-        if user is not None:
+        if user is None:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         return BroadcastResult()
 
@@ -363,7 +365,7 @@ class GatewayServiceRPC(FleetGatewayServiceServicer):
         self, request: SubscribeAllRequest, context: grpc.ServicerContext
     ) -> Generator[MachineStatus, None, None]:
         user = self._validate_auth(context)
-        if user is not None:
+        if user is None:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, "Gateway not configured")
         yield MachineStatus()
 

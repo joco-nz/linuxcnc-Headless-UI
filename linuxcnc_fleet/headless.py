@@ -19,6 +19,11 @@ try:
 except ImportError:
     _hal = None  # type: ignore[assignment]
 
+
+class _NoDefault:
+    """Sentinel for optional constructor parameters."""
+
+
 from linuxcnc_fleet.fleet_pb2 import (
     BroadcastRequest,
     ErrorEvent,
@@ -186,12 +191,14 @@ class LinuxCncSidecar:
 
     POLL_INTERVAL = 0.02  # 50 Hz
 
-    def __init__(self, ini_path: Optional[str] = None, machine_id: Optional[str] = None):
+    def __init__(self, ini_path: Optional[str] = None, machine_id: Optional[str] = None,
+                 _hal_override=_NoDefault):
         if linuxcnc is None:
             raise RuntimeError("linuxcnc module not available — requires LinuxCNC installation")
 
         self._ini_path = ini_path or linuxcnc.ini.find()
         self._machine_id = machine_id or "default"
+        self._hal = _hal_override if _hal_override is not _NoDefault else _hal
 
         # Initialize linuxcnc bindings
         self._stat = linuxcnc.stat()
@@ -379,49 +386,48 @@ class LinuxCncSidecar:
 
     def read_hal_pin(self, name: str) -> HalPinValue:
         """Read a HAL pin value via the _hal module."""
-        if _hal is None:
+        if self._hal is None:
             raise RuntimeError("_hal module not available")
 
         try:
-            pin_type = _hal.get_type(name)
-            value = _hal.get_value(name)
+            pin_type = self._hal.get_type(name)
+            value = self._hal.get_value(name)
         except Exception as e:
             raise ValueError(f"HAL pin '{name}' not found: {e}") from e
 
         hal_type = _map_hal_pin_type(pin_type)
-        is_output = _hal.is_output(name) if hasattr(_hal, 'is_output') else False
 
         if hal_type == HalPinType.PIN_TYPE_BIT:
             return HalPinValue(
-                pin_name=name, type=hal_type, value_bit=bool(value), is_output=is_output,
+                pin_name=name, type=hal_type, value_bit=bool(value),
             )
         elif hal_type == HalPinType.PIN_TYPE_U32:
             return HalPinValue(
-                pin_name=name, type=hal_type, value_u32=int(value), is_output=is_output,
+                pin_name=name, type=hal_type, value_u32=int(value),
             )
         elif hal_type == HalPinType.PIN_TYPE_S32:
             return HalPinValue(
-                pin_name=name, type=hal_type, value_s32=int(value), is_output=is_output,
+                pin_name=name, type=hal_type, value_s32=int(value),
             )
         else:
             return HalPinValue(
-                pin_name=name, type=hal_type, value_f=float(value), is_output=is_output,
+                pin_name=name, type=hal_type, value_f=float(value),
             )
 
     def list_hal_components(self) -> HalComponentList:
         """Enumerate HAL components and their pins."""
-        if _hal is None:
+        if self._hal is None:
             raise RuntimeError("_hal module not available")
 
         components: list[HalComponentInfo] = []
         try:
-            for comp_name in _hal.comp_list():
+            for comp_name in self._hal.comp_list():
                 pins = []
-                for pin_name in _hal.list_pins(comp_name):
+                for pin_name in self._hal.list_pins(comp_name):
                     try:
-                        pin_type = _hal.get_type(pin_name)
-                        value = _hal.get_value(pin_name)
-                        is_output = _hal.is_output(pin_name) if hasattr(_hal, 'is_output') else False
+                        pin_type = self._hal.get_type(pin_name)
+                        value = self._hal.get_value(pin_name)
+                        is_output = self._hal.is_output(pin_name) if hasattr(self._hal, 'is_output') else False
 
                         hal_type = _map_hal_pin_type(pin_type)
                         pi = HalPinInfo(
@@ -441,11 +447,11 @@ class LinuxCncSidecar:
                     except Exception:
                         pass
 
-                update_period = _hal.get_update_period(comp_name) if hasattr(_hal, 'get_update_period') else 0.0
+                update_period = self._hal.get_update_period(comp_name) if hasattr(self._hal, 'get_update_period') else 0.0
                 params: dict[str, float] = {}
-                for param_name in _hal.list_params(comp_name) if hasattr(_hal, 'list_params') else []:
+                for param_name in self._hal.list_params(comp_name) if hasattr(self._hal, 'list_params') else []:
                     try:
-                        params[param_name] = float(_hal.get_param(param_name))
+                        params[param_name] = float(self._hal.get_param(param_name))
                     except Exception:
                         pass
 
@@ -635,7 +641,7 @@ class LinuxCncSidecar:
             if not directory:
                 directory = self._ini("RS274", "subdirectory") or ""
                 if not directory:
-                    directory = self._ini("EMC_TASK_CALL_SUB_DIRECTORY") or "."
+                    directory = self._ini("EMC_TASK_CALL_SUB_DIRECTORY", "") or "."
 
             programs = []
             root_depth = directory.rstrip(os.sep).count(os.sep)
@@ -680,14 +686,14 @@ class LinuxCncSidecar:
                       value_u32: int = 0, value_s32: int = 0,
                       value_bit: bool = False) -> Result:
         """Write a HAL pin value (output pins only)."""
-        if _hal is None:
+        if self._hal is None:
             return Result(
                 success=False, message="_hal module not available",
                 error_code=ErrorCode.INTERNAL_ERROR,
             )
 
         try:
-            is_output = _hal.is_output(pin_name) if hasattr(_hal, 'is_output') else False
+            is_output = self._hal.is_output(pin_name) if hasattr(self._hal, 'is_output') else False
             if not is_output:
                 return Result(
                     success=False, message=f"Pin '{pin_name}' is not an output",
@@ -696,21 +702,21 @@ class LinuxCncSidecar:
 
             # Determine which value to write based on pin type
             try:
-                pin_type = _hal.get_type(pin_name)
+                pin_type = self._hal.get_type(pin_name)
             except Exception:
                 return Result(
                     success=False, message=f"Pin '{pin_name}' not found",
                     error_code=ErrorCode.HAL_PIN_NOT_FOUND,
                 )
 
-            if pin_type == _hal.HAL_BIT:
-                _hal.set_value(pin_name, 1.0 if value_bit else 0.0)
-            elif pin_type == _hal.HAL_U32:
-                _hal.set_value(pin_name, float(value_u32))
-            elif pin_type == _hal.HAL_S32:
-                _hal.set_value(pin_name, float(value_s32))
+            if pin_type == self._hal.HAL_BIT:
+                self._hal.set_value(pin_name, 1.0 if value_bit else 0.0)
+            elif pin_type == self._hal.HAL_U32:
+                self._hal.set_value(pin_name, float(value_u32))
+            elif pin_type == self._hal.HAL_S32:
+                self._hal.set_value(pin_name, float(value_s32))
             else:
-                _hal.set_value(pin_name, value_f)
+                self._hal.set_value(pin_name, value_f)
 
             return Result(success=True, message=f"Wrote to pin '{pin_name}'")
         except Exception as e:
