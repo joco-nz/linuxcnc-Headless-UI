@@ -45,7 +45,7 @@ echo ""
 # ── Prerequisite checks ────────────────────────────────────────────────────────
 
 # Check linuxcnc module
-if ! python3 -c "import linuxcnc; print(f'  linuxcnc module: OK (version {linuxcnc.FILE_VERSION()})')" 2>/dev/null; then
+if ! python3 -c "import linuxcnc" 2>/dev/null; then
     echo "ERROR: linuxcnc Python module not found." >&2
     echo "       Install LinuxCNC 2.9 or activate its environment first." >&2
     exit 1
@@ -58,8 +58,16 @@ if ! pip show linuxcnc-fleet &>/dev/null; then
     exit 1
 fi
 
+# Check that a LinuxCNC instance is actually running
+if ! pgrep -f "milltask|linuxcncsvr" >/dev/null 2>&1; then
+    echo "ERROR: No running LinuxCNC instance found." >&2
+    echo "       Start LinuxCNC first (e.g. 'linuxcnc /path/to/config.ini')." >&2
+    exit 1
+fi
+
 echo "  linuxcnc module: OK"
 echo "  linuxcnc-fleet package: OK ($(pip show linuxcnc-fleet 2>/dev/null | grep Version))"
+echo "  LinuxCNC running: OK"
 echo ""
 
 # ── Kill any existing processes on our ports ───────────────────────────────────
@@ -85,31 +93,35 @@ echo "  Gateway PID: $GATEWAY_PID"
 
 # ── Start Sidecar ──────────────────────────────────────────────────────────────
 echo "Starting sidecar on :$SIDECAR_PORT ..."
-SIDEcar_ARGS=(
+SIDECAR_ARGS=(
     --port "$SIDECAR_PORT"
     --machine-id "$MACHINE_ID"
     --gateway
     --jwt-secret "$JWT_SECRET"
     --issuer "$JWT_ISSUER"
     --audience "$JWT_AUDIENCE"
+    --gateway-address "localhost:$GATEWAY_PORT"
     -v
 )
 
 if [[ -n "$INI_PATH" ]]; then
-    SIDEcar_ARGS+=(--ini "$INI_PATH")
+    SIDECAR_ARGS+=(--ini "$INI_PATH")
     echo "  INI file: $INI_PATH"
-else
-    # Try to find INI via linuxcnc module
-    FOUND_INI=$(python3 -c "import linuxcnc; print(linuxcnc.find_file('ini') or '')" 2>/dev/null || true)
-    if [[ -n "$FOUND_INI" ]]; then
-        SIDEcar_ARGS+=(--ini "$FOUND_INI")
-        echo "  INI file: $FOUND_INI (auto-detected)"
-    else
-        echo "  WARNING: No INI file found. Sidecar will use default machine ID." >&2
+   else
+        # Try to find INI via linuxcnc module
+        FOUND_INI=$(python3 -c "import linuxcnc; print(linuxcnc.find_file('ini') or '')" 2>/dev/null || true)
+        if [[ -n "$FOUND_INI" ]]; then
+            SIDECAR_ARGS+=(--ini "$FOUND_INI")
+            echo "  INI file: $FOUND_INI (auto-detected)"
+        else
+            echo "ERROR: No INI file found and none specified." >&2
+            echo "       Provide one via --ini /path/to/file.ini" >&2
+            kill "$GATEWAY_PID" 2>/dev/null || true
+            exit 1
+        fi
     fi
-fi
 
-headless-server "${SIDEcar_ARGS[@]}" &
+headless-server "${SIDECAR_ARGS[@]}" &
 SIDECAR_PID=$!
 echo "  Sidecar PID: $SIDECAR_PID"
 echo ""

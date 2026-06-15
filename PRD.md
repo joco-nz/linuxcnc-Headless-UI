@@ -257,7 +257,7 @@ class User:
 ```protobuf
 message MachineStatus {
   string machine_id = 1;
-  MachineState state = 2;           // OFF, INITIALIZING, RUNNING, PAUSED, HOLD, E_STOP, JOG, MANUAL, AUTO_DONE
+  MachineState state = 2;           // OFF, INITIALIZING, RUNNING, PAUSED, HOLD, E_STOP, JOG, AUTO_DONE
   ExecutionState execution = 3;     // EXEC_IDLE, RUN, FAST_RUN, STEP, RETRACT, MDA
   InterpState interp_state = 4;     // INTERP_IDLE, READ, PREDICT, EXECUTE, ERROR
   EstopState estop_state = 5;       // UNKNOWABLE, NOT_E_STOPPED, E_STOPPED
@@ -280,6 +280,12 @@ message MachineStatus {
   int32 motion_type = 22;
 }
 ```
+
+Note: `state` and `mode` are orthogonal concepts, matching LinuxCNC's own separation:
+- **`state`** reflects the real-time system (RCS) readiness — whether the controller is idle, running a program, or done. Mapped from `linuxcnc.stat.state` (`RCS_IDLE`, `RCS_RUNNING`, `RCS_DONE`).
+- **`mode`** reflects the operator console mode — how the machine responds to input. Mapped from `linuxcnc.stat.mode` (`MODE_MANUAL`, `MODE_AUTO`, `MODE_MDI`).
+
+They are independent: a machine in MANUAL mode can be RUNNING (operator jogging), while a machine in AUTO mode can be OFF (waiting for a program to start).
 
 #### State Mapping (linuxcnc → protobuf)
 
@@ -412,21 +418,23 @@ viewer ──► operator ──► programmer ──► maintainer ──► ad
 
 ## 7. Test Coverage Summary
 
-**Total: 452 tests passing across 14 test files**
+**Total: 612 tests passing across 16 test files**
 
 | Phase | Component    | Test File               | Tests | Status  |
 | ----- | ------------ | ----------------------- | ----- | ------- |
 | 1     | Core Sidecar | `test_state_mapping.py` | 26    | Passing |
 | 1     | Core Sidecar | `test_snapshot.py`      | 7     | Passing |
-| 1     | Core Sidecar | `test_sidecar.py`       | 22    | Passing |
+| 1     | Core Sidecar | `test_sidecar.py`       | 63    | Passing |
+| 1     | Core Sidecar | `test_fleet_service_rpc.py` | 64  | Passing |
 | 1     | CLI          | `test_cli.py`           | 26    | Passing |
-| 2     | Auth         | `test_auth.py`          | 31    | Passing |
+| 2     | Auth         | `test_auth.py`          | 38    | Passing |
 | 2     | Policies     | `test_policies.py`      | 62    | Passing |
 | 2     | Registry     | `test_registry.py`      | 41    | Passing |
-| 2     | Gateway      | `test_gateway.py`       | 36    | Passing |
+| 2     | Gateway      | `test_gateway.py`       | 64    | Passing |
 | 2     | Gateway CLI  | `test_gateway_cli.py`   | 31    | Passing |
 | 2     | Interceptor  | `test_interceptor.py`   | 21    | Passing |
-| 3     | FleetClient  | `test_fleet_client.py`  | 46    | Passing |
+| 3     | FleetClient       | `test_fleet_client.py`        | 46    | Passing |
+| 3     | FleetClient Auth  | `test_fleet_client_auth.py`   | 20    | Passing |
 | 4     | Integration  | `test_integration.py`   | 17    | Passing |
 | 5     | Syslog       | `test_logging_config.py`| 16    | Passing |
 | 6     | FleetUI      | `test_fleet_ui.py`      | 70    | Passing |
@@ -441,8 +449,8 @@ linuxcnc-fleet/
 │   └── fleet.proto              # gRPC service definition (354 lines, 2 services, 30+ messages)
 ├── linuxcnc_fleet/
 │   ├── __init__.py
-│   ├── headless.py              # LinuxCncSidecar class — polling loop, state mapping (753 lines)
-│   ├── server.py                # gRPC server creation + FleetServiceServicer (484 lines)
+│   ├── headless.py              # LinuxCncSidecar class — polling loop, state mapping (759 lines)
+│   ├── server.py                # gRPC server creation + FleetServiceRPC with role hierarchy checks (486 lines)
 │   ├── cli.py                   # CLI entry point: headless-server (167 lines)
 │   ├── auth.py                  # Server-side mTLS/OIDC interceptor (167 lines)
 │   ├── fleet_pb2.py             # Generated protobuf messages
@@ -466,15 +474,17 @@ linuxcnc-fleet/
 │   ├── conftest.py              # Shared mock fixtures (linuxcnc, _hal, gRPC servers)
 │   ├── test_state_mapping.py    # State enum mapping correctness (26 tests)
 │   ├── test_snapshot.py         # Snapshot immutability & atomic swap (7 tests)
-│   ├── test_sidecar.py          # Control command error paths (22 tests)
+│   ├── test_sidecar.py          # Control command error paths (63 tests)
+│   ├── test_fleet_service_rpc.py # FleetServiceRPC auth checks, error paths, delegation (64 tests)
 │   ├── test_cli.py              # CLI argument parsing (26 tests)
-│   ├── test_auth.py             # OIDC token parsing + expiration (31 tests)
+│   ├── test_auth.py             # OIDC token parsing + expiration (38 tests)
 │   ├── test_policies.py         # RBAC policy evaluation (62 tests)
 │   ├── test_registry.py         # Machine registry CRUD + TTL expiry (41 tests)
-│   ├── test_gateway.py          # Gateway RPC handlers + broadcast fan-out + thread cleanup (36 tests)
+│   ├── test_gateway.py          # Gateway RPC handlers + broadcast fan-out + thread cleanup (64 tests)
 │   ├── test_gateway_cli.py      # Gateway CLI parsing (31 tests)
 │   ├── test_interceptor.py      # mTLS/OIDC interceptor behavior (21 tests)
 │   ├── test_fleet_client.py     # FleetClient routing, streaming, retry (46 tests)
+│   ├── test_fleet_client_auth.py # FleetClient OIDC auth interceptor (20 tests)
 │   ├── test_logging_config.py   # Syslog logging configuration (16 tests)
 │   ├── test_fleet_ui.py         # FleetUI dashboard HTTP handlers + SSE streaming + XSS protections (70 tests)
 │   └── test_integration.py      # Full flow: FleetClient → Gateway → Sidecar (17 tests)

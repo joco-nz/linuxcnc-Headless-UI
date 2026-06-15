@@ -282,8 +282,10 @@ class TestMachineRegistry:
         assert registry._running is True
         assert registry._cleanup_thread is not None
         assert registry._cleanup_thread.is_alive()
+        thread = registry._cleanup_thread
         registry.stop()
         assert registry._running is False
+        assert not thread.is_alive()
 
     def test_start_twice_no_error(self):
         registry = create_test_registry()

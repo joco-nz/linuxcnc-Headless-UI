@@ -300,3 +300,130 @@ def test_setup_logging_syslog_address(monkeypatch):
         logging.root.removeHandler(handler)
 
     setup_logging(verbose=False, use_syslog=True, syslog_address="/run/systemd/journal/syslog")
+
+
+class TestHttpTokenArgs:
+    def test_http_port_default_none(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test"])
+        assert args.http_port is None
+
+    def test_http_port_custom(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test", "--http-port", "50053"])
+        assert args.http_port == 50053
+
+    def test_allowed_roles_default(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test"])
+        assert args.allowed_roles == "viewer,operator"
+
+    def test_allowed_roles_custom(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test", "--allowed-roles", "viewer,operator,programmer"])
+        assert args.allowed_roles == "viewer,operator,programmer"
+
+    def test_token_ttl_default(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test"])
+        assert args.token_ttl == 900
+
+    def test_token_ttl_custom(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test", "--token-ttl", "1800"])
+        assert args.token_ttl == 1800
+
+    def test_allow_admin_token_default_false(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test"])
+        assert args.allow_admin_token is False
+
+    def test_allow_admin_token_enabled(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test", "--allow-admin-token"])
+        assert args.allow_admin_token is True
+
+    def test_allowed_subjects_default(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test"])
+        assert args.allowed_subjects == "fleet-ui"
+
+    def test_allowed_subjects_custom(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test", "--allowed-subjects", "fleet-ui,fleet-app"])
+        assert args.allowed_subjects == "fleet-ui,fleet-app"
+
+    def test_allowed_ips_default(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test"])
+        assert args.allowed_ips == "127.0.0.1,::1"
+
+    def test_allowed_ips_custom(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test", "--allowed-ips", "192.168.1.0/24"])
+        assert args.allowed_ips == "192.168.1.0/24"
+
+    def test_permissive_default_false(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test"])
+        assert args.permissive is False
+
+    def test_permissive_enabled(self):
+        from gateway.cli import parse_args
+        args = parse_args(["--jwt-secret", "test", "--permissive"])
+        assert args.permissive is True
+
+
+class TestHttpPortValidation:
+    def test_http_port_negative_rejected(self, capsys):
+        from gateway.cli import main
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--jwt-secret", "test", "--http-port", "-1"])
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "--http-port must be a positive integer" in captured.err
+
+    def test_http_port_zero_rejected(self, capsys):
+        from gateway.cli import main
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--jwt-secret", "test", "--http-port", "0"])
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "--http-port must be a positive integer" in captured.err
+
+    def test_http_port_valid(self):
+        from gateway.cli import main
+        mock_registry_instance = MagicMock()
+        mock_registry_instance.stop = lambda: None
+        with patch("gateway.server.run_gateway_server") as mock_run:
+            with patch("gateway.registry.MachineRegistry", return_value=mock_registry_instance):
+                main(["--jwt-secret", "test", "--http-port", "50053"])
+                call_kwargs = mock_run.call_args[1]
+                assert call_kwargs["http_port"] == 50053
+
+
+class TestHttpPortPassedToServer:
+    def test_all_http_params_passed(self):
+        from gateway.cli import main
+        mock_registry_instance = MagicMock()
+        mock_registry_instance.stop = lambda: None
+        with patch("gateway.server.run_gateway_server") as mock_run:
+            with patch("gateway.registry.MachineRegistry", return_value=mock_registry_instance):
+                main([
+                    "--jwt-secret", "test",
+                    "--http-port", "50053",
+                    "--allowed-roles", "viewer,operator,admin",
+                    "--token-ttl", "1800",
+                    "--allow-admin-token",
+                    "--allowed-subjects", "fleet-ui,app1",
+                    "--allowed-ips", "127.0.0.1,192.168.1.1",
+                    "--permissive",
+                ])
+                call_kwargs = mock_run.call_args[1]
+                assert call_kwargs["http_port"] == 50053
+                assert call_kwargs["allowed_roles"] == ["viewer", "operator", "admin"]
+                assert call_kwargs["token_ttl"] == 1800
+                assert call_kwargs["allow_admin_token"] is True
+                assert call_kwargs["allowed_subjects"] == ["fleet-ui", "app1"]
+                assert call_kwargs["allowed_ips"] == ["127.0.0.1", "192.168.1.1"]
+                assert call_kwargs["permissive"] is True

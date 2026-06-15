@@ -1,5 +1,7 @@
 """Tests for control command error paths (E-stop guard, mode validation, etc.)."""
 
+import time
+
 import pytest
 
 from linuxcnc_fleet.fleet_pb2 import ErrorCode, EstopState, Mode, Result, TrajAxis
@@ -199,6 +201,60 @@ class TestSnapshotPolling:
         assert isinstance(status, MachineStatus)
         assert status.machine_id == "test"
         assert status.joint_actual.x == 0.0
+        assert isinstance(status.spindle_speed, float)
+
+
+class TestPollIntervalConfig:
+    def test_default_poll_interval_is_50hz(self, linuxcnc_module):
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
+        assert sidecar.POLL_INTERVAL == 0.02
+
+    def test_custom_poll_interval_via_constructor(self, linuxcnc_module):
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", poll_interval=0.1)
+        assert sidecar.POLL_INTERVAL == 0.1
+
+    def test_slow_poll_interval(self, linuxcnc_module):
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", poll_interval=1.0)
+        assert sidecar.POLL_INTERVAL == 1.0
+
+    def test_fast_poll_interval(self, linuxcnc_module):
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", poll_interval=0.005)
+        assert sidecar.POLL_INTERVAL == 0.005
+
+    def test_invalid_poll_interval_rejected(self, linuxcnc_module):
+        with pytest.raises(ValueError, match="poll_interval must be positive"):
+            LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", poll_interval=0)
+
+    def test_negative_poll_interval_rejected(self, linuxcnc_module):
+        with pytest.raises(ValueError, match="poll_interval must be positive"):
+            LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", poll_interval=-0.5)
+
+    def test_env_var_sets_poll_interval(self, linuxcnc_module, monkeypatch):
+        monkeypatch.setenv("LINUXCNC_FLEET_POLL_INTERVAL", "0.25")
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
+        assert sidecar.POLL_INTERVAL == 0.25
+
+    def test_constructor_overrides_env_var(self, linuxcnc_module, monkeypatch):
+        monkeypatch.setenv("LINUXCNC_FLEET_POLL_INTERVAL", "0.25")
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", poll_interval=0.1)
+        assert sidecar.POLL_INTERVAL == 0.1
+
+    def test_invalid_env_var_falls_back_to_default(self, linuxcnc_module, monkeypatch):
+        monkeypatch.setenv("LINUXCNC_FLEET_POLL_INTERVAL", "not_a_number")
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
+        assert sidecar.POLL_INTERVAL == 0.02
+
+    def test_polling_thread_uses_custom_interval(self, linuxcnc_module):
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", poll_interval=0.05)
+        sidecar.run()
+
+        time.sleep(0.15)  # Should complete ~3 iterations at 0.05s each
+
+        assert sidecar._poll_thread is not None
+        assert sidecar._poll_thread.is_alive()
+        assert sidecar.POLL_INTERVAL == 0.05
+
+        sidecar.shutdown()
 
 
 class TestListPrograms:
@@ -210,6 +266,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return ".ngc .ntpl"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -224,6 +282,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return "ngc ntpl"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -241,6 +301,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return "ngc ntpl"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -258,6 +320,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return "ngc ntpl"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -273,6 +337,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return "ngc"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -292,6 +358,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return "ngc"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -318,6 +386,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return "ngc"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -334,6 +404,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return "ngc"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -358,6 +430,8 @@ class TestListPrograms:
         def ini_mock(section, option):
             if section == "TRAJ" and option == "program_extension":
                 return "ngc"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None
 
         sidecar._ini = ini_mock
@@ -380,6 +454,8 @@ class TestListPrograms:
         sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
 
         def ini_mock(section, option):
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
             return None  # No program_extension set
 
         sidecar._ini = ini_mock
@@ -432,6 +508,79 @@ class TestListPrograms:
         sidecar._ini = ini_mock
         programs = sidecar.list_programs(directory="")
         assert len(programs) == 1
+
+    def test_path_traversal_blocked(self, linuxcnc_module, tmp_path):
+        """Directory traversal via .. is blocked — files outside base_dir are skipped."""
+        safe_dir = tmp_path / "safe"
+        safe_dir.mkdir()
+        (safe_dir / "ok.ngc").write_text("G0 X1")
+
+        etc_dir = tmp_path / "etc"
+        etc_dir.mkdir()
+        (etc_dir / "passwd.ngc").write_text("fake passwd")
+
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
+
+        def ini_mock(section, option):
+            if section == "TRAJ" and option == "program_extension":
+                return "ngc ntpl"
+            if section == "RS274" and option == "subdirectory":
+                return str(safe_dir)
+            return None
+
+        sidecar._ini = ini_mock
+        programs = sidecar.list_programs(directory=str(safe_dir))
+        assert len(programs) == 1
+        assert programs[0]["name"] == "ok"
+        names = {p["name"] for p in programs}
+        assert "passwd" not in names
+
+    def test_symlink_target_resolved(self, linuxcnc_module, tmp_path):
+        """Symlinks are resolved — files in the symlink target are listed."""
+        target_dir = tmp_path / "target"
+        target_dir.mkdir()
+        (target_dir / "found.ngc").write_text("G0 X1")
+
+        link = tmp_path / "link"
+        link.symlink_to(target_dir)
+
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
+
+        def ini_mock(section, option):
+            if section == "TRAJ" and option == "program_extension":
+                return "ngc"
+            if section == "RS274" and option == "subdirectory":
+                return str(tmp_path)
+            return None
+
+        sidecar._ini = ini_mock
+        programs = sidecar.list_programs(directory=str(link))
+        assert len(programs) == 1
+        assert programs[0]["name"] == "found"
+
+    def test_dotdot_escape_from_base_blocked(self, linuxcnc_module, tmp_path):
+        """Path with .. components that escape the base directory is blocked."""
+        safe_dir = tmp_path / "safe"
+        safe_dir.mkdir()
+        (safe_dir / "ok.ngc").write_text("G0 X1")
+
+        secret_dir = tmp_path / "secret"
+        secret_dir.mkdir()
+        (secret_dir / "leaked.ngc").write_text("secret code")
+
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
+
+        def ini_mock(section, option):
+            if section == "TRAJ" and option == "program_extension":
+                return "ngc"
+            if section == "RS274" and option == "subdirectory":
+                return str(safe_dir)
+            return None
+
+        sidecar._ini = ini_mock
+        programs = sidecar.list_programs(directory=str(safe_dir / ".." / "secret"))
+        names = {p["name"] for p in programs}
+        assert "leaked" not in names
 
 
 class TestReadHalPin:

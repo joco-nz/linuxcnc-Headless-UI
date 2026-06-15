@@ -257,8 +257,10 @@ def fleet_app(mock_client):
 @pytest.fixture
 def aiohttp_app(fleet_app):
     """Provide a web.Application with FleetApp in app['fleet']."""
+    import argparse
     app = web.Application()
     app["fleet"] = fleet_app
+    app["args"] = argparse.Namespace(port=8080, gateway="localhost:50052", token="", tls_cert=None, tls_key=None, timeout=120)
     create_routes(app)
     return app
 
@@ -392,9 +394,11 @@ class TestFleetApp:
         assert result["success"] is True
         assert mock_client.set_mode_calls[0] == ("machine-1", 1)  # MODE_MANUAL = 1
 
-    async def test_set_mode_unknown_returns_zero(self, fleet_app, mock_client):
-        await fleet_app.set_mode("machine-1", "UNKNOWN_MODE")
-        assert mock_client.set_mode_calls[-1][1] == 0  # unknown mode maps to 0
+    async def test_set_mode_unknown_returns_error(self, fleet_app, mock_client):
+        result = await fleet_app.set_mode("machine-1", "UNKNOWN_MODE")
+        assert result["success"] is False
+        assert "Unknown machine mode" in result["message"]
+        assert not mock_client.set_mode_calls  # never forwarded to client
 
     async def test_send_mdi_forwards_to_client(self, fleet_app, mock_client):
         result = await fleet_app.send_mdi("machine-1", "G0 X10")
@@ -446,11 +450,38 @@ class TestFleetApp:
         assert result["value_f"] == pytest.approx(123.456)
 
     async def test_write_hal_pin_forwards_typed_values(self, fleet_app, mock_client):
-        result = await fleet_app.write_hal_pin("machine-1", "pin-out", float=3.14, bit=False)
+        result = await fleet_app.write_hal_pin("machine-1", "pin-out", float=3.14)
         assert result["success"] is True
         call_args = mock_client.write_hal_pin_calls[0]
         assert call_args[2]["float"] == 3.14
-        assert call_args[2]["bit"] is False
+
+    async def test_write_hal_pin_rejects_multiple_value_types(self, fleet_app, mock_client):
+        result = await fleet_app.write_hal_pin("machine-1", "pin-out", float=3.14, bit=False)
+        assert result["success"] is False
+        assert "Multiple value types provided" in result["message"]
+
+    async def test_write_hal_pin_rejects_zero_value_types(self, fleet_app, mock_client):
+        result = await fleet_app.write_hal_pin("machine-1", "pin-out")
+        assert result["success"] is False
+        assert "Exactly one of bit, float, u32, or s32 must be provided" in result["message"]
+
+    async def test_write_hal_pin_with_bit_value(self, fleet_app, mock_client):
+        result = await fleet_app.write_hal_pin("machine-1", "pin-out", bit=True)
+        assert result["success"] is True
+        call_args = mock_client.write_hal_pin_calls[0]
+        assert call_args[2]["bit"] is True
+
+    async def test_write_hal_pin_with_u32_value(self, fleet_app, mock_client):
+        result = await fleet_app.write_hal_pin("machine-1", "pin-out", u32=42)
+        assert result["success"] is True
+        call_args = mock_client.write_hal_pin_calls[0]
+        assert call_args[2]["u32"] == 42
+
+    async def test_write_hal_pin_with_s32_value(self, fleet_app, mock_client):
+        result = await fleet_app.write_hal_pin("machine-1", "pin-out", s32=-100)
+        assert result["success"] is True
+        call_args = mock_client.write_hal_pin_calls[0]
+        assert call_args[2]["s32"] == -100
 
     async def test_get_errors_returns_error_dicts(self, fleet_app, mock_client):
         result = await fleet_app.get_errors("machine-1")
@@ -502,7 +533,7 @@ class TestFleetApp:
     async def test_remove_stream_cleans_up(self, fleet_app, mock_client):
         await fleet_app.stream_status("machine-1")
         assert "machine-1" in fleet_app._streams
-        fleet_app.remove_stream("machine-1")
+        await fleet_app.remove_stream("machine-1")
         assert "machine-1" not in fleet_app._streams
 
     async def test_stream_all_machines_creates_stream(self, fleet_app, mock_client):
@@ -514,7 +545,7 @@ class TestFleetApp:
     async def test_remove_all_stream_cleans_up(self, fleet_app, mock_client):
         await fleet_app.stream_all_machines()
         assert "__all__" in fleet_app._streams
-        fleet_app.remove_all_stream()
+        await fleet_app.remove_all_stream()
         assert "__all__" not in fleet_app._streams
 
     async def test_get_last_status_returns_cached(self, fleet_app, mock_client):
@@ -526,6 +557,123 @@ class TestFleetApp:
     async def test_get_last_status_returns_none_for_unknown(self, fleet_app):
         result = await fleet_app.get_last_status("nonexistent")
         assert result is None
+
+    async def test_stream_status_reconnects_on_error(self, fleet_app, mock_client):
+        """Stream should reconnect after gRPC error with exponential backoff."""
+        call_count = 0
+
+        async def failing_subscribe(machine_id):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise grpc.aio.AioRpcError(
+                    code=lambda: grpc.StatusCode.UNAVAILABLE,
+                    details=lambda: "connection refused",
+                    initial_metadata=None, trailing_metadata=None,
+                )
+            for i in range(2):
+                yield MachineStatus(machine_id=machine_id, state=3, execution=1, interp_state=3,
+                                    estop_state=1, mode=2, joint_actual=Position(x=float(i), y=0.0, z=0.0))
+                await asyncio.sleep(0.01)
+
+        original_subscribe = mock_client.subscribe_status
+        mock_client.subscribe_status = failing_subscribe
+
+        stream = await fleet_app.stream_status("machine-1")
+        assert "machine-1" in fleet_app._streams
+
+        await asyncio.sleep(2.5)  # Wait for retry after 2s backoff
+
+        stream.close()
+        await asyncio.sleep(0.2)
+
+        assert call_count == 2
+
+    async def test_stream_status_stops_retrying_when_closed(self, fleet_app, mock_client):
+        """Stream should stop reconnecting once client disconnects (stream closed)."""
+        error_count = 0
+
+        def always_fail(machine_id):
+            nonlocal error_count
+            error_count += 1
+
+            async def _gen():
+                raise grpc.aio.AioRpcError(
+                    code=lambda: grpc.StatusCode.UNAVAILABLE,
+                    details=lambda: "connection refused",
+                    initial_metadata=None, trailing_metadata=None,
+                )
+            return _gen()
+
+        original_subscribe = mock_client.subscribe_status
+        mock_client.subscribe_status = always_fail
+
+        stream = await fleet_app.stream_status("machine-1")
+        await asyncio.sleep(0.1)
+
+        # Close the stream while a retry is pending
+        stream.close()
+        await asyncio.sleep(1.5)  # Wait longer than first backoff (2s)
+
+        assert error_count == 1
+
+    async def test_stream_all_reconnects_on_error(self, fleet_app, mock_client):
+        """StreamAll should reconnect after gRPC error with exponential backoff."""
+        call_count = 0
+
+        async def failing_subscribe():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise grpc.aio.AioRpcError(
+                    code=lambda: grpc.StatusCode.UNAVAILABLE,
+                    details=lambda: "connection refused",
+                    initial_metadata=None, trailing_metadata=None,
+                )
+            for mid in ["machine-1", "machine-2"]:
+                yield mid, MachineStatus(machine_id=mid, state=3, execution=1, interp_state=3,
+                                         estop_state=1, mode=2, joint_actual=Position(x=0.0, y=0.0, z=0.0))
+                await asyncio.sleep(0.01)
+
+        original_subscribe = mock_client.subscribe_all_status
+        mock_client.subscribe_all_status = failing_subscribe
+
+        stream = await fleet_app.stream_all_machines()
+        assert "__all__" in fleet_app._streams
+
+        await asyncio.sleep(2.5)  # Wait for retry after 2s backoff
+
+        stream.close()
+        await asyncio.sleep(0.2)
+
+        assert call_count == 2
+
+    async def test_stream_all_stops_retrying_when_closed(self, fleet_app, mock_client):
+        """StreamAll should stop reconnecting once client disconnects."""
+        error_count = 0
+
+        def always_fail():
+            nonlocal error_count
+            error_count += 1
+
+            async def _gen():
+                raise grpc.aio.AioRpcError(
+                    code=lambda: grpc.StatusCode.UNAVAILABLE,
+                    details=lambda: "connection refused",
+                    initial_metadata=None, trailing_metadata=None,
+                )
+            return _gen()
+
+        original_subscribe = mock_client.subscribe_all_status
+        mock_client.subscribe_all_status = always_fail
+
+        stream = await fleet_app.stream_all_machines()
+        await asyncio.sleep(0.1)
+
+        stream.close()
+        await asyncio.sleep(1.5)
+
+        assert error_count == 1
 
     async def test_ensure_client_uses_mock(self, fleet_app, mock_client):
         """When _mock_client is set, _ensure_client returns it without calling init."""
@@ -557,6 +705,50 @@ class TestHTTPHandlers:
         text = await resp.text()
         assert "<title>LinuxCNC Fleet Dashboard</title>" in text
         assert "LinuxCNC Fleet" in text
+
+    async def test_handle_index_embeds_gateway_from_args(self, aiohttp_app):
+        import argparse
+        aiohttp_app["args"] = argparse.Namespace(port=8080, gateway="custom-gw:9999", token="", tls_cert=None, tls_key=None, timeout=120)
+        server = TestServer(aiohttp_app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.get("/")
+            text = await resp.text()
+            assert 'value="custom-gw:9999"' in text
+            assert "autoConnect" in text
+            assert "'false'" in text
+        finally:
+            await client.close()
+
+    async def test_handle_index_prepopulates_token(self, aiohttp_app):
+        import argparse
+        aiohttp_app["args"] = argparse.Namespace(port=8080, gateway="localhost:50052", token="my-jwt-token", tls_cert=None, tls_key=None, timeout=120)
+        server = TestServer(aiohttp_app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.get("/")
+            text = await resp.text()
+            assert 'value="my-jwt-token"' in text
+            assert "autoConnect" in text
+            assert "'true'" in text
+        finally:
+            await client.close()
+
+    async def test_handle_index_no_auto_connect_without_token(self, aiohttp_app):
+        import argparse
+        aiohttp_app["args"] = argparse.Namespace(port=8080, gateway="localhost:50052", token="", tls_cert=None, tls_key=None, timeout=120)
+        server = TestServer(aiohttp_app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.get("/")
+            text = await resp.text()
+            assert "autoConnect" in text
+            assert "'false'" in text
+        finally:
+            await client.close()
 
     async def test_handle_connect_with_valid_token(self, client, fleet_app):
         resp = await client.post(
@@ -680,6 +872,112 @@ class TestHTTPHandlers:
         data = await resp.json()
         assert "error" in data
 
+    async def test_handle_hal_write_rejects_no_value_type(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={})
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_multiple_value_types(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"bit": True, "float": 1.0})
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_invalid_bit_type(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"bit": 1})
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_invalid_float_type(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"float": "not_a_number"})
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_u32_out_of_range_negative(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"u32": -1})
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_u32_out_of_range_too_large(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"u32": 4294967296})
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_s32_out_of_range_negative(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"s32": -2147483649})
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_s32_out_of_range_too_large(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"s32": 2147483648})
+        assert resp.status == 400
+        data = await resp.json()
+        assert "error" in data
+
+    async def test_handle_hal_write_rejects_u32_bool(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"u32": True})
+        assert resp.status == 400
+        data = await resp.json()
+
+    async def test_handle_hal_write_rejects_s32_bool(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"s32": False})
+        assert resp.status == 400
+        data = await resp.json()
+
+    async def test_handle_hal_write_accepts_valid_bit(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"bit": True})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+
+    async def test_handle_hal_write_accepts_valid_u32(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"u32": 4294967295})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+
+    async def test_handle_hal_write_accepts_valid_s32(self, client, fleet_app, mock_client):
+        resp = await client.post("/api/hal/write/machine-1/pin-out", json={"s32": -2147483648})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+
+    async def test_handle_stream_does_not_crash_with_args_port(self, client, fleet_app, mock_client):
+        resp = await client.get("/api/stream/status/machine-1")
+        assert resp.status == 200
+        chunk = await resp.content.readany()
+        assert b"data:" in chunk
+
+    async def test_handle_stream_all_does_not_crash_with_args_port(self, client, fleet_app, mock_client):
+        resp = await client.get("/api/stream/all")
+        assert resp.status == 200
+        chunk = await resp.content.readany()
+        assert b"data:" in chunk
+
+    async def test_handle_stream_sets_cors_for_matching_origin(self, client, fleet_app, mock_client):
+        resp = await client.get(
+            "/api/stream/status/machine-1",
+            headers={"Origin": "http://localhost:8080"},
+        )
+        assert resp.status == 200
+        assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:8080"
+        await resp.content.readany()
+
+    async def test_handle_stream_all_sets_cors_for_matching_origin(self, client, fleet_app, mock_client):
+        resp = await client.get(
+            "/api/stream/all",
+            headers={"Origin": "http://localhost:8080"},
+        )
+        assert resp.status == 200
+        assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:8080"
+        await resp.content.readany()
+
     # SSE streaming routes tested via TestSSEStream class — direct HTTP consumption
     # would block on the 120s queue timeout. The _iter_lines, send, close paths
     # are fully covered by unit tests above.
@@ -774,8 +1072,17 @@ class TestHelpers:
     def test_mode_to_int_uppercase(self):
         assert _mode_to_int("manual") == 1
 
-    def test_mode_to_int_unknown_returns_zero(self):
-        assert _mode_to_int("BOGUS") == 0
+    def test_mode_to_int_unknown_raises_valueerror(self):
+        with pytest.raises(ValueError, match="Unknown machine mode"):
+            _mode_to_int("BOGUS")
+
+    def test_mode_to_int_empty_raises_valueerror(self):
+        with pytest.raises(ValueError, match="Unknown machine mode"):
+            _mode_to_int("")
+
+    def test_mode_to_int_none_like_raises_valueerror(self):
+        with pytest.raises(ValueError, match="Unknown machine mode"):
+            _mode_to_int("UNKNOWN")
 
 
 # ---------------------------------------------------------------------------

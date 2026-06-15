@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -16,7 +17,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--port",
         type=int,
-        default=50051,
+        default=int(os.environ.get("GATEWAY_PORT", "50051")),
         help="gRPC server port (default: 50051)",
     )
     parser.add_argument(
@@ -84,6 +85,48 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default="user",
         help="Syslog facility name (default: user). Options: kern, user, daemon, mail, syslog, auth, local0-local7.",
     )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=None,
+        help="Enable HTTP token issuance server on this port (e.g. 50053). Omit to disable.",
+    )
+    parser.add_argument(
+        "--allowed-roles",
+        type=str,
+        default="viewer,operator",
+        help="Comma-separated list of roles allowed in issued tokens (default: viewer,operator). Admin requires --allow-admin-token.",
+    )
+    parser.add_argument(
+        "--token-ttl",
+        type=int,
+        default=900,
+        help="Token validity period in seconds (default: 900 = 15 minutes).",
+    )
+    parser.add_argument(
+        "--allow-admin-token",
+        action="store_true",
+        default=False,
+        help="Allow 'admin' role tokens via HTTP endpoint. Not included in --allowed-roles by default.",
+    )
+    parser.add_argument(
+        "--allowed-subjects",
+        type=str,
+        default="fleet-ui",
+        help="Comma-separated list of allowed JWT sub (subject) claims for token requests (default: fleet-ui).",
+    )
+    parser.add_argument(
+        "--allowed-ips",
+        type=str,
+        default="127.0.0.1,::1",
+        help="Comma-separated list of allowed source IPs for token requests (default: 127.0.0.1, ::1).",
+    )
+    parser.add_argument(
+        "--permissive",
+        action="store_true",
+        default=False,
+        help="Use OR security mode: accept if either IP or subject matches. Default is AND (both must match).",
+    )
     return parser.parse_args(argv)
 
 
@@ -98,6 +141,9 @@ def validate_args(args: argparse.Namespace) -> list[str]:
 
     if not args.jwt_secret and not args.jwks_url:
         errors.append("Either --jwt-secret or --jwks-url must be provided for OIDC validation")
+
+    if args.http_port is not None and args.http_port <= 0:
+        errors.append("--http-port must be a positive integer")
 
     return errors
 
@@ -157,6 +203,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     policy_engine = PolicyEngine()
     registry = MachineRegistry()
 
+    allowed_roles = [r.strip() for r in args.allowed_roles.split(",") if r.strip()]
+    allowed_subjects = [s.strip() for s in args.allowed_subjects.split(",") if s.strip()]
+    allowed_ips = [ip.strip() for ip in args.allowed_ips.split(",") if ip.strip()]
+
     try:
         tls_enabled = args.cert is not None and args.key is not None
         run_gateway_server(
@@ -168,6 +218,13 @@ def main(argv: Optional[list[str]] = None) -> None:
             cert_file=args.cert,
             key_file=args.key,
             root_cert_file=args.root_cert,
+            http_port=args.http_port,
+            allowed_roles=allowed_roles,
+            allowed_subjects=allowed_subjects,
+            allowed_ips=allowed_ips,
+            token_ttl=args.token_ttl,
+            allow_admin_token=args.allow_admin_token,
+            permissive=args.permissive,
         )
     except KeyboardInterrupt:
         log.info("Gateway server interrupted")

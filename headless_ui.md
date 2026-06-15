@@ -390,8 +390,7 @@ class LinuxCncSidecar:
         # stat.poll() -> extract: state, execution, interp_state, estop, mode
         # stat.position -> world + joint positions
         # stat.joint_actual_pos, stat.joint_commanded_pos
-        # stat.linear_axis, stat.angular_axis for axis identification
-        # command.get_feedrate(), get_spindle_speed()
+        # stat.linear_axis for feedrate, stat.spindle for spindle speed (RPM)
         # error_channel.poll() for new errors
         # Create new _Snapshot object and atomically swap reference via object.__setattr__
 
@@ -886,8 +885,8 @@ linuxcnc-fleet/
 │   └── fleet.proto              # gRPC service definition (all RPCs + messages) — 375 lines, 27 RPCs
 ├── linuxcnc_fleet/
 │   ├── __init__.py
-│   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module — 753 lines
-│   ├── server.py                # gRPC server per instance + FleetServiceRPC with role hierarchy checks — 484 lines
+│   ├── headless.py              # LinuxCncSidecar class — wraps linuxcnc module — 759 lines
+│   ├── server.py                # gRPC server per instance + FleetServiceRPC with role hierarchy checks — 486 lines
 │   ├── cli.py                   # CLI entry point: headless-server --ini ... + OIDC args (--jwt-secret, --jwks-url, --issuer, --audience) — 167 lines
 │   └── auth.py                  # mTLS/OIDC interceptor for FleetService (AuthContext, AuthInterceptor, AuthDecorator) — 167 lines
 ├── gateway/
@@ -913,15 +912,17 @@ linuxcnc-fleet/
 │   ├── conftest.py              # Shared mock fixtures (linuxcnc, _hal, gRPC servers)
 │   ├── test_state_mapping.py    # Phase 1: state mapping correctness (26 tests)
 │   ├── test_snapshot.py         # Phase 1: snapshot immutability (7 tests)
-│   ├── test_sidecar.py          # Phase 1: control command error paths (22 tests)
+│   ├── test_sidecar.py          # Phase 1: control command error paths (63 tests)
+│   ├── test_fleet_service_rpc.py # Phase 1: FleetServiceRPC auth checks, error paths, delegation (64 tests)
 │   ├── test_cli.py              # Phase 1: CLI argument parsing (26 tests)
-│   ├── test_auth.py             # Phase 2: OIDC token parsing + expiration (31 tests)
+│   ├── test_auth.py             # Phase 2: OIDC token parsing + expiration (38 tests)
 │   ├── test_policies.py         # Phase 2: RBAC policy evaluation (62 tests)
 │   ├── test_registry.py         # Phase 2: machine registry CRUD + TTL expiry (41 tests)
-│   ├── test_gateway.py          # Phase 2: broadcast fan-out + thread cleanup (36 tests)
+│   ├── test_gateway.py          # Phase 2: broadcast fan-out + thread cleanup (64 tests)
 │   ├── test_gateway_cli.py      # Phase 2: gateway CLI parsing (31 tests)
 │   ├── test_interceptor.py      # Phase 2: OIDC interceptor behavior (21 tests)
 │   ├── test_fleet_client.py     # Phase 3: FleetClient routing, streaming, retry (46 tests)
+│   ├── test_fleet_client_auth.py # Phase 3: FleetClient OIDC auth interceptor (20 tests)
 │   ├── test_logging_config.py   # Phase 5: syslog logging configuration (16 tests)
 │   ├── test_fleet_ui.py         # Phase 6: FleetUI dashboard HTTP handlers + SSE streaming + XSS protections (70 tests)
 │   └── test_integration.py      # Phase 4: full flow integration (17 tests)
@@ -1068,8 +1069,9 @@ fleet-ui --gateway localhost:50050 --port 8443 \
 - [x] Unit tests: state mapping correctness (26 tests, `test_state_mapping.py`)
 - [x] Unit tests: snapshot immutability and atomic swap behavior (7 tests, `test_snapshot.py`)
 - [x] Unit tests: CLI argument parsing and TLS validation (26 tests, `test_cli.py`)
-- [x] Unit tests: control command error paths (22 tests, `test_sidecar.py`)
-- **Total: 81/81 tests passing**
+- [x] Unit tests: control command error paths (63 tests, `test_sidecar.py`)
+- [x] Unit tests: FleetServiceRPC auth checks + delegation (64 tests, `test_fleet_service_rpc.py` — NEW)
+- **Total: 186/186 tests passing**
 
 ### Phase 2: Gateway & Auth (Week 3-4) ✅ COMPLETE
 - [x] Implement FleetGatewayService RPCs (`gateway/server.py`)
@@ -1102,17 +1104,18 @@ fleet-ui --gateway localhost:50050 --port 8443 \
 - [x] Server auth wiring (`linuxcnc_fleet/server.py`) — FleetServiceRPC integrates interceptor
 - [x] CLI auth wiring (`linuxcnc_fleet/cli.py`) — --jwt-secret/--jwks-url args, creates user_extractor
   - **Known bug**: `AuthManager(secret=...)` should be `AuthManager(secret_key=...)` (line 117 of cli.py)
-- [x] Unit tests: OIDC token parsing and expiration checks (31 tests, `test_auth.py`)
+- [x] Unit tests: OIDC token parsing and expiration checks (38 tests, `test_auth.py`)
 - [x] Unit tests: RBAC policy evaluation — role + facility + tags filtering (62 tests, `test_policies.py`)
 - [x] Unit tests: machine registry CRUD and TTL expiry (41 tests, `test_registry.py`)
-- [x] Unit tests: broadcast fan-out with per-result tracking (35 tests, `test_gateway.py`)
+- [x] Unit tests: broadcast fan-out with per-result tracking (64 tests, `test_gateway.py`)
 - [x] Unit tests: gateway CLI parsing and TLS validation (31 tests, `test_gateway_cli.py`)
-- [x] Unit tests: OIDC interceptor behavior (19 tests, `test_interceptor.py`)
-- **Cumulative: 300/300 tests passing** (81 Phase 1 + 219 Phase 2)
+- [x] Unit tests: OIDC interceptor behavior (21 tests, `test_interceptor.py`)
+- **Cumulative: 443/443 tests passing** (186 Phase 1 + 257 Phase 2)
 
 ### Phase 3: Client Library & UI Integration (Week 5-6) ✅ COMPLETE
 - [x] Implement `FleetClient` high-level library (`fleet_client/client.py`, 1161 lines)
-- [x] OIDC auth interceptor (`fleet_client/auth.py`, 76 lines)
+- [x] OIDC auth interceptor (`fleet_client/auth.py`, 92 lines)
+- [x] Unit tests: FleetClient OIDC auth interceptor (20 tests, `test_fleet_client_auth.py` — NEW)
 - [x] Generated gRPC stubs for all services (regenerated with HomeAxis, SendMdiCommand, LoadProgram RPCs)
 - [x] Channel caching with TTL expiry (default 300s) and thread-safe cleanup
 - [x] Streaming status subscription support (async generators)
@@ -1126,7 +1129,7 @@ fleet-ui --gateway localhost:50050 --port 8443 \
 - [x] Unit tests: fleet service wrappers (17 tests, `test_fleet_client.py` — includes home_axis, load_program)
 - [x] Unit tests: TLS channel creation (2 tests, `test_fleet_client.py`)
 - [x] Unit tests: async context manager (2 tests, `test_fleet_client.py`)
-- **Cumulative: 346/346 tests passing** (300 + 46 FleetClient)
+- **Cumulative: 509/509 tests passing** (443 + 66 FleetClient)
 
 ### Phase 4: Hardening & Packaging (Week 7-8) ✅ COMPLETE (Integration Tests + Packaging)
 - [x] Integration tests: full flow — FleetClient → Gateway → Sidecar → linuxcnc.stat (17 tests, `test_integration.py`)
@@ -1136,7 +1139,7 @@ fleet-ui --gateway localhost:50050 --port 8443 \
   - [x] `TestSidecarDirectCommands`: set_mode, home_axis, send_mdi_command, load_program, subscribe_status_stream, get_errors (6 tests)
   - [x] `TestGatewayAuthIntegration`: unauthenticated_request_rejected, viewer_cannot_broadcast (2 tests)
   - [x] `TestRegistryHeartbeat`: heartbeat_updates_last_seen, expired_machine_removed (2 tests)
-- **Cumulative: 363/363 tests passing** (346 + 17 Integration)
+- **Cumulative: 526/526 tests passing** (509 + 17 Integration)
 - All integration tests use real gRPC servers (not stubs) to exercise serialization, channel setup, auth interceptor chaining, broadcast fan-out
 - [x] Package distribution (pip wheel) — `linuxcnc-fleet` package with `[sidecar]`, `[gateway]`, `[client]`, `[dev]` extras
 - [ ] Load testing: concurrent connections, broadcast performance
@@ -1150,7 +1153,7 @@ fleet-ui --gateway localhost:50050 --port 8443 \
   - [x] Component-tagged log records for routing
 - [x] CLI integration — `--syslog`, `--syslog-address`, `--syslog-facility` flags for sidecar and gateway
 - [x] Unit tests: logging configuration and syslog routing (16 tests, `test_logging_config.py`)
-- **Cumulative: 379/379 tests passing** (363 + 16 Syslog)
+- **Cumulative: 542/542 tests passing** (526 + 16 Syslog)
 
 ### Phase 6: FleetUI Dashboard ✅ COMPLETE
 - [x] aiohttp web dashboard (`fleet_ui/server.py`, ~1903 lines including HTML/CSS/JS)
@@ -1163,7 +1166,7 @@ fleet-ui --gateway localhost:50050 --port 8443 \
 - [x] TLS support for the dashboard itself (`--tls-cert`, `--tls-key` flags)
 - [x] JSON error handling on HTTP handlers (400 Bad Request for malformed bodies)
 - [x] Unit tests: HTTP handlers, SSE streaming, XSS protections (70 tests, `test_fleet_ui.py`)
-- **Cumulative: 452/452 tests passing** (379 + 70 FleetUI)
+- **Cumulative: 612/612 tests passing** (542 + 70 FleetUI)
 
 ---
 

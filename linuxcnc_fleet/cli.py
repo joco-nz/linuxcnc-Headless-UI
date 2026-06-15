@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from linuxcnc_fleet.headless import LinuxCncSidecar
@@ -26,9 +27,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Unique machine identifier (default: 'default')",
     )
     parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=None,
+        help="Sidecar polling interval in seconds (default: 0.02 / 50Hz). Can also be set via LINUXCNC_FLEET_POLL_INTERVAL env var.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="gRPC server worker thread pool size (default: 8). Can also be set via SIDECAR_GRPC_WORKERS env var.",
+    )
+    parser.add_argument(
         "--port",
         type=int,
-        default=50051,
+        default=int(os.environ.get("SIDECAR_PORT", "50051")),
         help="gRPC listen port (default: 50051)",
     )
     parser.add_argument(
@@ -51,6 +64,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Expose FleetGatewayService RPCs in addition to FleetService",
+    )
+    parser.add_argument(
+        "--gateway-address",
+        default=None,
+        help="Gateway address for auto-registration (host:port). Sidecar will register itself with the gateway on startup.",
     )
     parser.add_argument(
         "-v",
@@ -146,12 +164,83 @@ def main(argv: list[str] | None = None) -> None:
 
     # Create sidecar
     try:
-        sidecar = LinuxCncSidecar(ini_path=args.ini, machine_id=args.machine_id)
+        sidecar = LinuxCncSidecar(
+            ini_path=args.ini,
+            machine_id=args.machine_id,
+            poll_interval=args.poll_interval,
+        )
     except RuntimeError as e:
         logging.error("Failed to initialize sidecar: %s", e)
         sys.exit(1)
 
+    # Auto-register with gateway if --gateway-address is provided
+    if args.gateway_address and args.jwt_secret:
+        try:
+            import time
+            import grpc
+            
+            from linuxcnc_fleet.fleet_pb2 import RegisterRequest
+            from linuxcnc_fleet.fleet_pb2_grpc import FleetGatewayServiceStub
+
+            # Try to import jwt for token creation
+            try:
+                import jwt as pyjwt
+                
+                payload = {
+                    "iss": args.issuer or "linuxcnc-fleet",
+                    "aud": args.audience or "fleet-api",
+                    "sub": sidecar._machine_id,
+                    "role": "admin",
+                    "iat": int(time.time()),
+                    "exp": int(time.time()) + 3600,
+                }
+                token = pyjwt.encode(payload, args.jwt_secret, algorithm="HS256")
+                
+                from fleet_client.auth import BearerAuthInterceptor
+                
+                interceptor = BearerAuthInterceptor(token)
+                channel = grpc.insecure_channel(args.gateway_address)
+                channel = grpc.intercept_channel(channel, interceptor)
+                stub = FleetGatewayServiceStub(channel)
+                request = RegisterRequest(
+                    machine_id=sidecar._machine_id,
+                    address="localhost",
+                    port=args.port,
+                    facility="",
+                    tags=[],
+                    version="",
+                )
+                
+                # Retry registration with backoff (gateway may not be ready yet)
+                registered = False
+                for attempt in range(5):
+                    try:
+                        response = stub.RegisterMachine(request)
+                        channel.close()
+                        if response.success:
+                            logging.info("Registered with gateway at %s: %s", args.gateway_address, response.message)
+                        else:
+                            logging.error("Gateway rejected registration: %s", response.message)
+                            sys.exit(1)
+                        registered = True
+                        break
+                    except grpc.RpcError as e:
+                        if attempt < 4:
+                            logging.debug("Registration attempt %d failed: %s, retrying...", attempt + 1, e.code())
+                            time.sleep(1)
+                        else:
+                            raise
+                
+                if not registered:
+                    logging.warning("Could not register with gateway after 5 attempts")
+            except ImportError as e:
+                logging.warning("PyJWT not installed — skipping auto-registration (%s)", e)
+        except Exception as e:
+            logging.error("Auto-registration failed: %s", e)
+            logging.warning("Continuing without gateway registration")
+
     # Run server (blocks until interrupted)
+    workers = args.workers if args.workers is not None else int(os.environ.get("SIDECAR_GRPC_WORKERS", "8"))
     run_server(
         sidecar=sidecar,
         port=args.port,
@@ -160,6 +249,7 @@ def main(argv: list[str] | None = None) -> None:
         root_cert_file=args.root_cert,
         use_gateway=args.gateway,
         user_extractor=user_extractor,
+        max_workers=workers,
     )
 
 

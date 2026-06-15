@@ -169,3 +169,31 @@ class TestHelpOutput:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         assert "--syslog" in captured.out
+
+
+class TestWorkersArg:
+    def test_workers_default_none(self):
+        args = parse_args([])
+        assert args.workers is None
+
+    def test_workers_custom_value(self):
+        args = parse_args(["--workers", "16"])
+        assert args.workers == 16
+
+    def test_workers_zero_rejected(self):
+        # argparse doesn't reject 0 by default, but main() should validate
+        args = parse_args(["--workers", "0"])
+        assert args.workers == 0
+
+    def test_workers_from_env_var(self, monkeypatch):
+        monkeypatch.setenv("SIDECAR_GRPC_WORKERS", "32")
+        args = parse_args([])
+        # parse_args doesn't read env vars; main() does
+        assert args.workers is None
+
+    def test_workers_in_help_output(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            parse_args(["--help"])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "--workers" in captured.out

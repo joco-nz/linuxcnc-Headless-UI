@@ -34,10 +34,11 @@ class TestChannelCaching:
 
     def test_get_or_create_creates_new_channel(self):
         """First call creates a new channel."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_channel = Mock()
-            mock_grpc.insecure_channel.return_value = mock_channel
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+            MockAioGatewayStub.return_value = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -48,16 +49,17 @@ class TestChannelCaching:
                 ch = asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
                 assert ch is mock_channel
                 # Called once for gateway + once for machine channel
-                assert mock_grpc.insecure_channel.call_count == 2
+                assert mock_grpc.aio.insecure_channel.call_count == 1
             finally:
                 asyncio.run(client.close())
 
     def test_get_or_create_returns_cached_channel(self):
         """Second call returns the cached channel."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_channel = Mock()
-            mock_grpc.insecure_channel.return_value = mock_channel
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+            MockAioGatewayStub.return_value = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -69,18 +71,19 @@ class TestChannelCaching:
                 ch2 = asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
                 assert ch1 is ch2
                 # Called once for gateway + once for machine channel
-                assert mock_grpc.insecure_channel.call_count == 2
+                assert mock_grpc.aio.insecure_channel.call_count == 1
             finally:
                 asyncio.run(client.close())
 
     def test_get_or_create_different_address_new_channel(self):
         """Different address creates a new channel."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_gw_channel = Mock()
             mock_channel1 = Mock()
             mock_channel2 = Mock()
-            mock_grpc.insecure_channel.side_effect = [mock_gw_channel, mock_channel1, mock_channel2]
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = Mock()
+            mock_grpc.aio.insecure_channel.side_effect = [mock_gw_channel, mock_channel1, mock_channel2]
+            MockAioGatewayStub.return_value = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -96,12 +99,13 @@ class TestChannelCaching:
 
     def test_cache_key_is_host_port(self):
         """Cache key combines address and port."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_gw_channel = Mock()
             mock_channel1 = Mock()
             mock_channel2 = Mock()
-            mock_grpc.insecure_channel.side_effect = [mock_gw_channel, mock_channel1, mock_channel2]
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = Mock()
+            mock_grpc.aio.insecure_channel.side_effect = [mock_gw_channel, mock_channel1, mock_channel2]
+            MockAioGatewayStub.return_value = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -117,10 +121,11 @@ class TestChannelCaching:
 
     def test_ttl_expiry_closes_and_recreates(self):
         """Expired channel is closed and a new one created."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_channel = Mock()
-            mock_grpc.insecure_channel.return_value = mock_channel
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+            MockAioGatewayStub.return_value = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -136,7 +141,7 @@ class TestChannelCaching:
                 asyncio.run(asyncio.sleep(0.05))
 
                 mock_channel2 = Mock()
-                mock_grpc.insecure_channel.return_value = mock_channel2
+                mock_grpc.aio.insecure_channel.return_value = mock_channel2
 
                 ch2 = asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
                 assert ch2 is mock_channel2
@@ -146,10 +151,11 @@ class TestChannelCaching:
 
     def test_cleanup_expired_channels_removes_old(self):
         """_cleanup_expired_channels removes expired entries."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_channel = Mock()
-            mock_grpc.insecure_channel.return_value = mock_channel
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+            MockAioGatewayStub.return_value = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -178,9 +184,10 @@ class TestGatewayRpcWrappers:
 
     def test_get_machines_returns_list(self):
         """get_machines returns parsed MachineEntry list."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_stub = AsyncMock()
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = mock_stub
+            MockAioGatewayStub.return_value = mock_stub
 
             mock_response = MagicMock()
             mock_response.machines = [MagicMock(machine_id="m1", machine_name="n1",
@@ -204,9 +211,10 @@ class TestGatewayRpcWrappers:
 
     def test_route_machine_returns_tuple(self):
         """route_machine returns (address, port) tuple."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_stub = AsyncMock()
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = mock_stub
+            MockAioGatewayStub.return_value = mock_stub
 
             mock_response = MagicMock(instance_address="10.0.0.5", instance_port=5007)
             mock_stub.RouteMachine = AsyncMock(return_value=mock_response)
@@ -225,9 +233,10 @@ class TestGatewayRpcWrappers:
 
     def test_broadcast_command_all_scope(self):
         """broadcast_command with ALL scope sends correct request."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_stub = AsyncMock()
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = mock_stub
+            MockAioGatewayStub.return_value = mock_stub
 
             mock_result = MagicMock(success=True, message="ok")
             mock_response = MagicMock()
@@ -248,9 +257,10 @@ class TestGatewayRpcWrappers:
 
     def test_broadcast_mdi_convenience(self):
         """broadcast_mdi delegates to broadcast_command."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_stub = AsyncMock()
-            mock_grpc.aio.FleetGatewayServiceStub.return_value = mock_stub
+            MockAioGatewayStub.return_value = mock_stub
 
             mock_result = MagicMock(success=True, message="ok")
             mock_response = MagicMock()
@@ -276,9 +286,10 @@ class TestClosedClient:
 
     def test_get_machines_raises_when_closed(self):
         """get_machines raises RuntimeError when client is closed."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
-            mock_grpc.aio.FleetGatewayServiceStub = Mock()
-            mock_grpc.insecure_channel = Mock()
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
+            MockFleetGatewayServiceStub = Mock()
+            mock_grpc.aio.insecure_channel = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -291,9 +302,10 @@ class TestClosedClient:
 
     def test_route_machine_raises_when_closed(self):
         """route_machine raises RuntimeError when client is closed."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
-            mock_grpc.aio.FleetGatewayServiceStub = Mock()
-            mock_grpc.insecure_channel = Mock()
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
+            MockFleetGatewayServiceStub = Mock()
+            mock_grpc.aio.insecure_channel = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -306,10 +318,11 @@ class TestClosedClient:
 
     def test_get_status_raises_when_closed(self):
         """get_status raises RuntimeError when client is closed."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_grpc.aio.FleetServiceStub = Mock()
-            mock_grpc.aio.FleetGatewayServiceStub = Mock()
-            mock_grpc.insecure_channel = Mock()
+            MockFleetGatewayServiceStub = Mock()
+            mock_grpc.aio.insecure_channel = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -322,10 +335,11 @@ class TestClosedClient:
 
     def test_set_mode_raises_when_closed(self):
         """set_mode raises RuntimeError when client is closed."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_grpc.aio.FleetServiceStub = Mock()
-            mock_grpc.aio.FleetGatewayServiceStub = Mock()
-            mock_grpc.insecure_channel = Mock()
+            MockFleetGatewayServiceStub = Mock()
+            mock_grpc.aio.insecure_channel = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -338,10 +352,11 @@ class TestClosedClient:
 
     def test_subscribe_status_raises_when_closed(self):
         """subscribe_status raises RuntimeError when client is closed."""
-        with patch("fleet_client.client.grpc") as mock_grpc:
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
             mock_grpc.aio.FleetServiceStub = Mock()
-            mock_grpc.aio.FleetGatewayServiceStub = Mock()
-            mock_grpc.insecure_channel = Mock()
+            MockFleetGatewayServiceStub = Mock()
+            mock_grpc.aio.insecure_channel = Mock()
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -927,10 +942,8 @@ class TestTLSChannel:
         """FleetClient creates secure channel when tls_enabled=True."""
         with patch("fleet_client.client.grpc") as mock_grpc:
             mock_base_channel = Mock()
-            mock_intercepted = Mock()
-            mock_grpc.secure_channel.return_value = mock_base_channel
+            mock_grpc.aio.secure_channel.return_value = mock_base_channel
             mock_grpc.ssl_channel_credentials.return_value = MagicMock()
-            mock_grpc.intercept_channel.return_value = mock_intercepted
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -938,10 +951,8 @@ class TestTLSChannel:
                 tls_enabled=True,
             )
             try:
-                assert mock_grpc.secure_channel.called
-                assert mock_grpc.intercept_channel.called
-                intercepted_ch = mock_grpc.intercept_channel.call_args[0][0]
-                assert intercepted_ch is mock_base_channel
+                asyncio.run(client._ensure_gateway_channel())
+                assert mock_grpc.aio.secure_channel.called
             finally:
                 asyncio.run(client.close())
 
@@ -949,7 +960,7 @@ class TestTLSChannel:
         """FleetClient creates insecure channel when tls_enabled=False."""
         with patch("fleet_client.client.grpc") as mock_grpc:
             mock_channel = Mock()
-            mock_grpc.insecure_channel.return_value = mock_channel
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",
@@ -957,8 +968,9 @@ class TestTLSChannel:
                 tls_enabled=False,
             )
             try:
-                assert mock_grpc.insecure_channel.called
-                assert not mock_grpc.secure_channel.called
+                asyncio.run(client._ensure_gateway_channel())
+                assert mock_grpc.aio.insecure_channel.called
+                assert not mock_grpc.aio.secure_channel.called
             finally:
                 asyncio.run(client.close())
 
@@ -971,7 +983,7 @@ class TestContextManager:
         """FleetClient works as async context manager."""
         with patch("fleet_client.client.grpc") as mock_grpc:
             mock_channel = Mock()
-            mock_grpc.insecure_channel.return_value = mock_channel
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
 
             async def _test():
                 async with FleetClient(
@@ -989,7 +1001,7 @@ class TestContextManager:
         """close() closes gateway channel and all machine channels."""
         with patch("fleet_client.client.grpc") as mock_grpc:
             mock_channel = Mock()
-            mock_grpc.insecure_channel.return_value = mock_channel
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
 
             client = FleetClient(
                 gateway_address="127.0.0.1:50051",

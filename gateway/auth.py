@@ -7,7 +7,9 @@ import dataclasses
 import json
 import logging
 import os
+import ssl
 import time
+from collections.abc import Mapping
 from typing import Any, Optional
 
 import jwt
@@ -49,6 +51,7 @@ class AuthManager:
         jwks_url: Optional[str] = None,
         secret_key: Optional[str] = None,
         algorithms: list[str] = None,
+        secret_keys: Optional[Mapping[str, str]] = None,
     ):
         if algorithms is None:
             algorithms = ["RS256", "HS256"]
@@ -58,8 +61,54 @@ class AuthManager:
         self.jwks_url = jwks_url
         self.secret_key = secret_key
         self.algorithms = algorithms
+        self._symmetric_keys: dict[str, str] = dict(secret_keys) if secret_keys else {}
         self._jwks_cache: dict[str, Any] | None = None
         self._jwks_expires_at: float = 0.0
+
+    def add_symmetric_key(self, kid: str, key: str) -> None:
+        """Add a symmetric signing key for HS256 token verification.
+
+        Useful for key rotation — adds a new key while keeping the old one
+        active so tokens signed with either key are accepted.
+        """
+        self._symmetric_keys[kid] = key
+
+    def remove_symmetric_key(self, kid: str) -> None:
+        """Remove a symmetric signing key by kid."""
+        self._symmetric_keys.pop(kid, None)
+
+    def _get_symmetric_key(self, kid: Optional[str]) -> str:
+        """Resolve the symmetric key to use for HS256 verification.
+
+        Priority: exact kid match in secret_keys → first key in dict if no kid
+                  → legacy secret_key (backward compat).
+        Returns the single key string when a specific kid is requested,
+        or raises TokenValidationError if no key can be resolved.
+        """
+        if self._symmetric_keys:
+            if kid and kid in self._symmetric_keys:
+                return self._symmetric_keys[kid]
+            if not kid:
+                # No kid specified — use the first available symmetric key
+                # (typically the oldest/primary key)
+                return next(iter(self._symmetric_keys.values()))
+
+        if self.secret_key is not None:
+            return self.secret_key
+
+        raise TokenValidationError("No secret key configured for symmetric signing")
+
+    def _get_symmetric_keys_for_verification(self) -> list[str]:
+        """Return all symmetric keys for multi-key verification during token decode.
+
+        Used in validate_token when we have multiple symmetric keys —
+        PyJWT will try each one until the signature validates.
+        """
+        if self._symmetric_keys:
+            return list(self._symmetric_keys.values())
+        if self.secret_key is not None:
+            return [self.secret_key]
+        return []
 
     def _fetch_jwks(self) -> dict[str, Any]:
         """Fetch JWKS document from the configured endpoint with caching."""
@@ -72,8 +121,17 @@ class AuthManager:
         if self._jwks_cache and time.time() < self._jwks_expires_at:
             return self._jwks_cache
 
+        if self.jwks_url.startswith("https://"):
+            ssl_context = ssl.create_default_context()
+        else:
+            log.warning(
+                "JWKS URL uses HTTP (not HTTPS) — token validation is vulnerable to MitM attacks: %s",
+                self.jwks_url,
+            )
+            ssl_context = None
+
         req = urllib.request.Request(self.jwks_url)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
             jwks_data = json.loads(response.read())
 
         self._jwks_cache = jwks_data
@@ -81,18 +139,20 @@ class AuthManager:
         return jwks_data
 
     def _get_signing_key(self, header: dict[str, Any]) -> Any:
-        """Get the signing key for the token based on its algorithm and kid."""
+        """Get the signing key for the token based on its algorithm and kid.
+
+        Returns a single key string for backward-compatible jwt.decode().
+        Multi-key HS256 is handled manually in validate_token via retry loop.
+        """
         alg = header.get("alg", "HS256")
         kid = header.get("kid")
 
         if not self.algorithms or alg not in self.algorithms:
             raise TokenValidationError(f"Algorithm {alg} not allowed")
 
-        # Symmetric key (HS256)
+        # Symmetric key (HS256) — resolve to single key; multi-key handled in validate_token
         if alg.startswith("HS"):
-            if self.secret_key is None:
-                raise TokenValidationError("No secret key configured for symmetric signing")
-            return self.secret_key
+            return self._get_symmetric_key(kid)
 
         # Asymmetric key (RS256/RS384/RS512)
         if self.jwks_url is None:
@@ -155,7 +215,7 @@ class AuthManager:
         """Validate an OIDC access token and extract user attributes.
 
         Validates:
-        - Signature (JWKS or secret key)
+        - Signature (JWKS or secret key; tries all symmetric keys on failure)
         - Expiration (exp claim)
         - Issuer (iss claim)
         - Audience (aud claim)
@@ -164,33 +224,92 @@ class AuthManager:
         - sub, name, email from standard claims
         - role, facility, machine_tags from custom claims
         """
+        # Decode header to get kid and algorithm without full verification
         try:
-            # Decode header to get kid and algorithm without full verification
             unverified_header = jwt.get_unverified_header(token)
+        except jwt.InvalidTokenError as e:
+            raise TokenValidationError(f"Invalid token: {e}")
+
+        alg = unverified_header.get("alg", "HS256")
+
+        decode_opts: dict[str, Any] = {
+            "algorithms": self.algorithms,
+            "audience": self.audience,
+            "issuer": self.issuer,
+            "options": {
+                "require": ["exp", "iss", "aud", "sub"],
+                "verify_exp": True,
+                "verify_iss": True,
+                "verify_aud": True,
+                "verify_sub": True,
+            },
+        }
+
+        # Try multi-key HS256 verification if we have multiple symmetric keys
+        if alg.startswith("HS") and len(self._symmetric_keys) > 1:
+            for key in self._symmetric_keys.values():
+                try:
+                    payload = jwt.decode(token, key, **decode_opts)
+                    return self._parse_claims(payload)
+                except jwt.ExpiredSignatureError:
+                    raise TokenValidationError("Token has expired")
+                except jwt.InvalidIssuerError:
+                    raise TokenValidationError(f"Invalid issuer: expected {self.issuer}")
+                except jwt.InvalidAudienceError:
+                    raise TokenValidationError(f"Invalid audience: expected {self.audience}")
+                except jwt.InvalidSignatureError:
+                    continue  # Try next key
+                except jwt.InvalidTokenError as e:
+                    raise TokenValidationError(f"Invalid token: {e}")
+
+            # All symmetric keys failed — fall back to legacy secret_key if configured
+            if self.secret_key is not None:
+                try:
+                    payload = jwt.decode(token, self.secret_key, **decode_opts)
+                    return self._parse_claims(payload)
+                except jwt.InvalidSignatureError:
+                    pass  # Legacy key also failed
+                except jwt.ExpiredSignatureError:
+                    raise TokenValidationError("Token has expired")
+                except jwt.InvalidIssuerError:
+                    raise TokenValidationError(f"Invalid issuer: expected {self.issuer}")
+                except jwt.InvalidAudienceError:
+                    raise TokenValidationError(f"Invalid audience: expected {self.audience}")
+                except jwt.InvalidTokenError as e:
+                    raise TokenValidationError(f"Invalid token: {e}")
+
+            raise TokenValidationError("Invalid token signature")
+
+        # Single-key path (backward compatible)
+        try:
             signing_key = self._get_signing_key(unverified_header)
-
-            # Decode and verify with all standard checks
-            payload = jwt.decode(
-                token,
-                signing_key,
-                algorithms=self.algorithms,
-                audience=self.audience,
-                issuer=self.issuer,
-                options={
-                    "require": ["exp", "iss", "aud", "sub"],
-                    "verify_exp": True,
-                    "verify_iss": True,
-                    "verify_aud": True,
-                    "verify_sub": True,
-                },
-            )
-
+            payload = jwt.decode(token, signing_key, **decode_opts)
         except jwt.ExpiredSignatureError:
             raise TokenValidationError("Token has expired")
         except jwt.InvalidIssuerError:
             raise TokenValidationError(f"Invalid issuer: expected {self.issuer}")
         except jwt.InvalidAudienceError:
             raise TokenValidationError(f"Invalid audience: expected {self.audience}")
+        except jwt.InvalidSignatureError:
+            # Multi-key HS256 fallback: try legacy secret_key if all configured keys failed.
+            # This handles the case where a token was signed with an old key that's
+            # no longer in secret_keys but is still the legacy secret_key.
+            if self.secret_key is not None:
+                try:
+                    payload = jwt.decode(token, self.secret_key, **decode_opts)
+                except jwt.InvalidSignatureError:
+                    raise TokenValidationError("Invalid token signature")
+                except jwt.ExpiredSignatureError:
+                    raise TokenValidationError("Token has expired")
+                except jwt.InvalidIssuerError:
+                    raise TokenValidationError(f"Invalid issuer: expected {self.issuer}")
+                except jwt.InvalidAudienceError:
+                    raise TokenValidationError(f"Invalid audience: expected {self.audience}")
+                except jwt.InvalidTokenError as e:
+                    raise TokenValidationError(f"Invalid token: {e}")
+            else:
+                raise TokenValidationError("Invalid token signature")
+
         except jwt.InvalidTokenError as e:
             raise TokenValidationError(f"Invalid token: {e}")
 
@@ -219,26 +338,36 @@ _TEST_SECRET_KEY = os.environ.get(
 )
 
 
-def create_test_auth_manager(secret_key: str | None = None) -> AuthManager:
+def create_test_auth_manager(
+    secret_key: str | None = None,
+    secret_keys: dict[str, str] | None = None,
+) -> AuthManager:
     """Create an AuthManager configured for testing with HS256.
 
     Args:
         secret_key: Optional override; defaults to TEST_SECRET_KEY env var or fallback.
+        secret_keys: Optional mapping of kid → key for multi-key rotation testing.
     """
     return AuthManager(
         issuer="https://test.auth.example.com",
         audience="linuxcnc-fleet",
         secret_key=secret_key or _TEST_SECRET_KEY,
         algorithms=["HS256"],
+        secret_keys=secret_keys,
     )
 
 
-def create_test_token(claims: dict[str, Any], secret_key: str | None = None) -> str:
+def create_test_token(
+    claims: dict[str, Any],
+    secret_key: str | None = None,
+    kid: str | None = None,
+) -> str:
     """Create a test JWT for unit tests.
 
     Args:
         claims: JWT payload claims to include.
         secret_key: Optional override; defaults to TEST_SECRET_KEY env var or fallback.
+        kid: Optional key ID header for multi-key testing.
     """
     now = int(time.time())
     payload = {
@@ -247,4 +376,10 @@ def create_test_token(claims: dict[str, Any], secret_key: str | None = None) -> 
         "aud": "linuxcnc-fleet",
         **claims,
     }
-    return jwt.encode(payload, secret_key or _TEST_SECRET_KEY, algorithm="HS256")
+    headers = {"kid": kid} if kid else None
+    return jwt.encode(
+        payload,
+        secret_key or _TEST_SECRET_KEY,
+        algorithm="HS256",
+        headers=headers,
+    )

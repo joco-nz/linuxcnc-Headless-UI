@@ -41,6 +41,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     IniParamValue,
     InterpState,
     LinuxCncVersion,
+    MachineControlState,
     MachineInfo,
     MachineState,
     MachineStatus,
@@ -70,30 +71,37 @@ def _map_machine_state(stat: Any) -> MachineState:
 
 
 def _map_execution_state(execution: int) -> ExecutionState:
-    mapping = {
-        linuxcnc.EXEC_STATE_IDLE: ExecutionState.EXEC_IDLE,
-        linuxcnc.EXEC_STATE_RUN: ExecutionState.RUN,
-        linuxcnc.EXEC_STATE_FAST_RUN: ExecutionState.FAST_RUN,
-        linuxcnc.EXEC_STATE_STEP: ExecutionState.STEP,
-        linuxcnc.EXEC_STATE_RETRACT: ExecutionState.RETRACT,
-        linuxcnc.EXEC_STATE_MDA: ExecutionState.MDA,
-    }
-    return mapping.get(execution, ExecutionState.EXEC_IDLE)
+    if execution == 0:
+        return ExecutionState.EXEC_IDLE
+    if execution == 1:
+        return ExecutionState.RUN
+    if execution == 2:
+        return ExecutionState.FAST_RUN
+    if execution == 3:
+        return ExecutionState.STEP
+    if execution == 4:
+        return ExecutionState.RETRACT
+    if execution == 5:
+        return ExecutionState.MDA
+    return ExecutionState.EXEC_IDLE
 
 
 def _map_interp_state(interp: int) -> InterpState:
-    mapping = {
-        linuxcnc.INTERP_IDLE: InterpState.INTERP_IDLE,
-        linuxcnc.INTERP_READ: InterpState.READ,
-        linuxcnc.INTERP_EXEC: InterpState.EXECUTE,
-    }
-    return mapping.get(interp, InterpState.INTERP_IDLE)
+    if interp == linuxcnc.INTERP_IDLE:
+        return InterpState.INTERP_IDLE
+    if interp == linuxcnc.INTERP_READING:
+        return InterpState.READ
+    if interp == linuxcnc.INTERP_WAITING:
+        return InterpState.PREDICT
+    if interp == linuxcnc.INTERP_PAUSED:
+        return InterpState.EXECUTE
+    return InterpState.INTERP_IDLE
 
 
 def _map_estop_state(estop: int) -> EstopState:
-    if estop == linuxcnc.ESTOP_ACK:
-        return EstopState.E_STOPPED
-    return EstopState.NOT_E_STOPPED
+    if estop == 0:
+        return EstopState.NOT_E_STOPPED
+    return EstopState.E_STOPPED
 
 
 def _map_mode(mode: int) -> Mode:
@@ -187,23 +195,57 @@ class _Snapshot:
 # ---------------------------------------------------------------------------
 
 class LinuxCncSidecar:
-    """Wraps linuxcnc module bindings with a 50Hz polling loop."""
+    """Wraps linuxcnc module bindings with a configurable polling loop.
 
-    POLL_INTERVAL = 0.02  # 50 Hz
+    The default poll rate is 50Hz (0.02s), which provides up to 20ms latency
+    for status updates — acceptable for dashboard visibility but not for
+    closed-loop control.
+
+    Poll interval can be configured via:
+    - Constructor parameter ``poll_interval``
+    - Environment variable ``LINUXCNC_FLEET_POLL_INTERVAL`` (seconds)
+    - Falls back to 0.02 (50Hz) if neither is set
+    """
+
+    DEFAULT_POLL_INTERVAL = 0.02  # 50 Hz
 
     def __init__(self, ini_path: Optional[str] = None, machine_id: Optional[str] = None,
-                 _hal_override=_NoDefault):
+                 poll_interval: Optional[float] = None, _hal_override=_NoDefault):
+        import os as _os
+
         if linuxcnc is None:
             raise RuntimeError("linuxcnc module not available — requires LinuxCNC installation")
 
-        self._ini_path = ini_path or linuxcnc.ini.find()
+        self._ini_path = ini_path or (linuxcnc.find_file('ini') if hasattr(linuxcnc, 'find_file') else None)
         self._machine_id = machine_id or "default"
         self._hal = _hal_override if _hal_override is not _NoDefault else _hal
+
+        # Poll interval: constructor > env var > default
+        poll_interval_sec = poll_interval
+        if poll_interval_sec is None:
+            env_val = _os.environ.get("LINUXCNC_FLEET_POLL_INTERVAL")
+            if env_val is not None:
+                try:
+                    poll_interval_sec = float(env_val)
+                except ValueError:
+                    log.warning("Invalid LINUXCNC_FLEET_POLL_INTERVAL '%s', using default 0.02", env_val)
+                    poll_interval_sec = self.DEFAULT_POLL_INTERVAL
+            else:
+                poll_interval_sec = self.DEFAULT_POLL_INTERVAL
+
+        if poll_interval_sec <= 0:
+            raise ValueError(f"poll_interval must be positive, got {poll_interval_sec}")
+
+        self.POLL_INTERVAL = poll_interval_sec
 
         # Initialize linuxcnc bindings
         self._stat = linuxcnc.stat()
         self._command = linuxcnc.command()
         self._error_channel = linuxcnc.error_channel()
+        if self._ini_path is None:
+            raise RuntimeError(
+                "INI file path is required. Pass --ini to CLI or set LINUXCNC_INIPATH env var"
+            )
         self._ini = linuxcnc.ini(self._ini_path)
 
         # Error queue for streaming
@@ -235,7 +277,7 @@ class LinuxCncSidecar:
     # ------------------------------------------------------------------
 
     def _poll_loop(self) -> None:
-        """Background loop: poll at 50Hz, build new snapshot each iteration."""
+        """Background loop: poll at configured rate, build new snapshot each iteration."""
         while self._running:
             try:
                 new_snapshot = self._build_snapshot()
@@ -252,67 +294,74 @@ class LinuxCncSidecar:
         # Collect errors from error channel
         with self._error_lock:
             while True:
-                try:
-                    err = self._error_channel.get()
-                    msg = f"{err['text']} (line {err['line']})"
-                    self._error_queue.append(msg)
-                    # Keep last 100 errors
-                    if len(self._error_queue) > 100:
-                        self._error_queue.pop(0)
-                except IndexError:
+                err = self._error_channel.poll()
+                if err is None:
                     break
+                msg = f"{err['text']} (line {err['line']})"
+                self._error_queue.append(msg)
+                # Keep last 100 errors
+                if len(self._error_queue) > 100:
+                    self._error_queue.pop(0)
 
-        # Extract positions
-        joint_actual = self._stat.joint_actual_pos
-        joint_commanded = self._stat.joint_commanded_pos
+        # joint_actual_position and joint_position are flat tuples indexed by axis
+        joint_actual = self._stat.joint_actual_position
+        joint_commanded = self._stat.joint_position
+
+        # position/actual_position are 9-tuples: (x, y, z, a, b, c, u, v, w)
+        pos = self._stat.position
+        actual = getattr(self._stat, 'actual_position', pos)
+
+        # Spindle is a tuple of dicts; use first spindle
+        spindles = self._stat.spindle
+        spindle0 = spindles[0] if spindles else {}
 
         return _Snapshot(
             machine_id=self._machine_id,
             state=self._stat.state,
-            execution=self._stat.execution,
+            execution=self._stat.exec_state,
             interp_state=self._stat.interp_state,
-            estop_state=self._stat.estop_state,
-            mode=self._stat.mode,
-            joint_actual_x=joint_actual[0][0],
-            joint_actual_y=joint_actual[1][0],
-            joint_actual_z=joint_actual[2][0],
-            joint_actual_a=joint_actual[3][0] if len(joint_actual) > 3 else 0.0,
-            joint_actual_b=joint_actual[4][0] if len(joint_actual) > 4 else 0.0,
-            joint_actual_c=joint_actual[5][0] if len(joint_actual) > 5 else 0.0,
-            joint_actual_u=joint_actual[6][0] if len(joint_actual) > 6 else 0.0,
-            joint_actual_v=joint_actual[7][0] if len(joint_actual) > 7 else 0.0,
-            joint_actual_w=joint_actual[8][0] if len(joint_actual) > 8 else 0.0,
-            joint_actual_p=joint_actual[9][0] if len(joint_actual) > 9 else 0.0,
-            joint_actual_q=joint_actual[10][0] if len(joint_actual) > 10 else 0.0,
-            joint_commanded_x=joint_commanded[0][0],
-            joint_commanded_y=joint_commanded[1][0],
-            joint_commanded_z=joint_commanded[2][0],
-            joint_commanded_a=joint_commanded[3][0] if len(joint_commanded) > 3 else 0.0,
-            joint_commanded_b=joint_commanded[4][0] if len(joint_commanded) > 4 else 0.0,
-            joint_commanded_c=joint_commanded[5][0] if len(joint_commanded) > 5 else 0.0,
-            joint_commanded_u=joint_commanded[6][0] if len(joint_commanded) > 6 else 0.0,
-            joint_commanded_v=joint_commanded[7][0] if len(joint_commanded) > 7 else 0.0,
-            joint_commanded_w=joint_commanded[8][0] if len(joint_commanded) > 8 else 0.0,
-            joint_commanded_p=joint_commanded[9][0] if len(joint_commanded) > 9 else 0.0,
-            joint_commanded_q=joint_commanded[10][0] if len(joint_commanded) > 10 else 0.0,
-            world_x=self._stat.x,
-            world_y=self._stat.y,
-            world_z=self._stat.z,
-            world_a=self._stat.a,
-            world_b=self._stat.b,
-            world_c=self._stat.c,
-            interp_line=self._stat.interp_line,
-            program_file=self._stat.program_file or "",
-            feedrate=self._stat.linear_axis.get('feedrate', 0.0),
-            feedrate_override=self._stat.linear_axis.get('feed_percent', 1.0),
-            spindle_speed=self._stat.spindle_at_speed,
-            spindle_speed_override=self._stat.spindle.get('speed_percent', 1.0),
-            coolant_mist=bool(self._stat.coolant_mist),
-            coolant_flood=bool(self._stat.coolant_flood),
-            coolant_mazak=bool(self._stat.coolant_mazak),
+            estop_state=self._stat.estop,
+            mode=self._stat.task_mode,
+            joint_actual_x=joint_actual[0] if len(joint_actual) > 0 else 0.0,
+            joint_actual_y=joint_actual[1] if len(joint_actual) > 1 else 0.0,
+            joint_actual_z=joint_actual[2] if len(joint_actual) > 2 else 0.0,
+            joint_actual_a=joint_actual[3] if len(joint_actual) > 3 else 0.0,
+            joint_actual_b=joint_actual[4] if len(joint_actual) > 4 else 0.0,
+            joint_actual_c=joint_actual[5] if len(joint_actual) > 5 else 0.0,
+            joint_actual_u=joint_actual[6] if len(joint_actual) > 6 else 0.0,
+            joint_actual_v=joint_actual[7] if len(joint_actual) > 7 else 0.0,
+            joint_actual_w=joint_actual[8] if len(joint_actual) > 8 else 0.0,
+            joint_actual_p=joint_actual[9] if len(joint_actual) > 9 else 0.0,
+            joint_actual_q=joint_actual[10] if len(joint_actual) > 10 else 0.0,
+            joint_commanded_x=joint_commanded[0] if len(joint_commanded) > 0 else 0.0,
+            joint_commanded_y=joint_commanded[1] if len(joint_commanded) > 1 else 0.0,
+            joint_commanded_z=joint_commanded[2] if len(joint_commanded) > 2 else 0.0,
+            joint_commanded_a=joint_commanded[3] if len(joint_commanded) > 3 else 0.0,
+            joint_commanded_b=joint_commanded[4] if len(joint_commanded) > 4 else 0.0,
+            joint_commanded_c=joint_commanded[5] if len(joint_commanded) > 5 else 0.0,
+            joint_commanded_u=joint_commanded[6] if len(joint_commanded) > 6 else 0.0,
+            joint_commanded_v=joint_commanded[7] if len(joint_commanded) > 7 else 0.0,
+            joint_commanded_w=joint_commanded[8] if len(joint_commanded) > 8 else 0.0,
+            joint_commanded_p=joint_commanded[9] if len(joint_commanded) > 9 else 0.0,
+            joint_commanded_q=joint_commanded[10] if len(joint_commanded) > 10 else 0.0,
+            world_x=pos[0],
+            world_y=pos[1],
+            world_z=pos[2],
+            world_a=pos[3],
+            world_b=pos[4],
+            world_c=pos[5],
+            interp_line=getattr(self._stat, 'motion_line', 0),
+            program_file=self._stat.file or "",
+            feedrate=self._stat.feedrate,
+            feedrate_override=getattr(self._stat, 'feed_override', 1.0) or 1.0,
+            spindle_speed=spindle0.get('speed', 0.0),
+            spindle_speed_override=spindle0.get('override', 1.0),
+            coolant_mist=bool(self._stat.mist),
+            coolant_flood=bool(self._stat.flood),
+            coolant_mazak=False,
             errors=list(self._error_queue),
             motion_type=self._stat.motion_type,
-            num_joints=self._stat.joint_config[0] if len(self._stat.joint_config) > 0 else 0,
+            num_joints=getattr(self._stat, 'joints', 0),
         )
 
     # ------------------------------------------------------------------
@@ -376,7 +425,7 @@ class LinuxCncSidecar:
                 build_type=build_type,
                 git_hash=git_hash,
             ),
-            num_joints=self._stat.joint_config[0] if len(self._stat.joint_config) > 0 else 0,
+            num_joints=getattr(self._stat, 'joints', 0),
             num_hal_components=0,  # populated by HAL enumeration
         )
 
@@ -638,15 +687,34 @@ class LinuxCncSidecar:
             extensions_str = self._ini("TRAJ", "program_extension") or "ngc"
             extensions = set(extensions_str.split())
 
-            if not directory:
-                directory = self._ini("RS274", "subdirectory") or ""
-                if not directory:
-                    directory = self._ini("EMC_TASK_CALL_SUB_DIRECTORY", "") or "."
+            # Trusted root is the INI-configured program subdirectory
+            ini_subdir = self._ini("RS274", "subdirectory") or ""
+            if not ini_subdir:
+                ini_subdir = self._ini("EMC_TASK_CALL_SUB_DIRECTORY", "") or "."
+            trusted_root = os.path.realpath(os.path.abspath(ini_subdir))
+
+            # Resolve user-provided directory; clamp to trusted root if it escapes
+            if directory:
+                candidate = os.path.realpath(os.path.abspath(directory))
+                if not (candidate == trusted_root or candidate.startswith(trusted_root + os.sep)):
+                    log.warning(
+                        "list_programs: directory '%s' resolved outside trusted root '%s', clamping",
+                        directory, trusted_root,
+                    )
+                    directory = ini_subdir if ini_subdir else "."
+            else:
+                directory = ini_subdir if ini_subdir else "."
+
+            base_dir = os.path.realpath(os.path.abspath(directory))
 
             programs = []
             root_depth = directory.rstrip(os.sep).count(os.sep)
 
             for root, dirs, files in os.walk(directory):
+                resolved_root = os.path.realpath(os.path.abspath(root))
+                if not resolved_root.startswith(base_dir + os.sep) and resolved_root != base_dir:
+                    dirs.clear()
+                    continue
                 if max_depth > 0:
                     current_depth = root.count(os.sep) - root_depth
                     if current_depth >= max_depth:
@@ -679,6 +747,37 @@ class LinuxCncSidecar:
         try:
             self._command.execute(linuxcnc.EXEC_STEP)
             return Result(success=True, message="Stepped forward")
+        except Exception as e:
+            return Result(success=False, message=str(e), error_code=ErrorCode.INTERNAL_ERROR)
+
+    def set_machine_state(self, state: MachineControlState) -> Result:
+        """Set machine control state (e-stop reset, power on/off).
+
+        Args:
+            state: MachineControlState enum value.
+                STATE_ESTOP_RESET (1) — Clear E-stop
+                STATE_ON (3) — Power on the machine
+                STATE_OFF (2) — Power off the machine
+                STATE_ESTOP (0) — Enter E-stop (internal to LinuxCNC)
+
+        Returns:
+            Result with success status and error message.
+        """
+        state_map = {
+            MachineControlState.STATE_ESTOP: linuxcnc.STATE_ESTOP,
+            MachineControlState.STATE_ESTOP_RESET: linuxcnc.STATE_ESTOP_RESET,
+            MachineControlState.STATE_OFF: linuxcnc.STATE_OFF,
+            MachineControlState.STATE_ON: linuxcnc.STATE_ON,
+        }
+        lcnc_state = state_map.get(state)
+        if lcnc_state is None:
+            return Result(
+                success=False, message=f"Unknown machine control state: {state}",
+                error_code=ErrorCode.INVALID_STATE,
+            )
+        try:
+            self._command.state(lcnc_state)
+            return Result(success=True, message=f"Machine state set to {state}")
         except Exception as e:
             return Result(success=False, message=str(e), error_code=ErrorCode.INTERNAL_ERROR)
 

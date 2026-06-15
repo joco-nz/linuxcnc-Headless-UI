@@ -56,6 +56,11 @@ class FleetServiceStub(object):
                 request_serializer=fleet__pb2.ExecutionCommand.SerializeToString,
                 response_deserializer=fleet__pb2.Result.FromString,
                 _registered_method=True)
+        self.SetMachineState = channel.unary_unary(
+                '/linuxcnc_fleet.FleetService/SetMachineState',
+                request_serializer=fleet__pb2.MachineStateCommand.SerializeToString,
+                response_deserializer=fleet__pb2.Result.FromString,
+                _registered_method=True)
         self.Start = channel.unary_unary(
                 '/linuxcnc_fleet.FleetService/Start',
                 request_serializer=fleet__pb2.Empty.SerializeToString,
@@ -177,6 +182,12 @@ class FleetServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def SetExecution(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetMachineState(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -317,6 +328,11 @@ def add_FleetServiceServicer_to_server(servicer, server):
             'SetExecution': grpc.unary_unary_rpc_method_handler(
                     servicer.SetExecution,
                     request_deserializer=fleet__pb2.ExecutionCommand.FromString,
+                    response_serializer=fleet__pb2.Result.SerializeToString,
+            ),
+            'SetMachineState': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetMachineState,
+                    request_deserializer=fleet__pb2.MachineStateCommand.FromString,
                     response_serializer=fleet__pb2.Result.SerializeToString,
             ),
             'Start': grpc.unary_unary_rpc_method_handler(
@@ -524,6 +540,33 @@ class FleetService(object):
             target,
             '/linuxcnc_fleet.FleetService/SetExecution',
             fleet__pb2.ExecutionCommand.SerializeToString,
+            fleet__pb2.Result.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetMachineState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/linuxcnc_fleet.FleetService/SetMachineState',
+            fleet__pb2.MachineStateCommand.SerializeToString,
             fleet__pb2.Result.FromString,
             options,
             channel_credentials,
@@ -1078,6 +1121,11 @@ class FleetGatewayServiceStub(object):
                 request_serializer=fleet__pb2.SubscribeAllRequest.SerializeToString,
                 response_deserializer=fleet__pb2.MachineStatus.FromString,
                 _registered_method=True)
+        self.RegisterMachine = channel.unary_unary(
+                '/linuxcnc_fleet.FleetGatewayService/RegisterMachine',
+                request_serializer=fleet__pb2.RegisterRequest.SerializeToString,
+                response_deserializer=fleet__pb2.RegisterResponse.FromString,
+                _registered_method=True)
 
 
 class FleetGatewayServiceServicer(object):
@@ -1107,6 +1155,12 @@ class FleetGatewayServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RegisterMachine(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FleetGatewayServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -1129,6 +1183,11 @@ def add_FleetGatewayServiceServicer_to_server(servicer, server):
                     servicer.SubscribeAllStatus,
                     request_deserializer=fleet__pb2.SubscribeAllRequest.FromString,
                     response_serializer=fleet__pb2.MachineStatus.SerializeToString,
+            ),
+            'RegisterMachine': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterMachine,
+                    request_deserializer=fleet__pb2.RegisterRequest.FromString,
+                    response_serializer=fleet__pb2.RegisterResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1239,6 +1298,33 @@ class FleetGatewayService(object):
             '/linuxcnc_fleet.FleetGatewayService/SubscribeAllStatus',
             fleet__pb2.SubscribeAllRequest.SerializeToString,
             fleet__pb2.MachineStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegisterMachine(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/linuxcnc_fleet.FleetGatewayService/RegisterMachine',
+            fleet__pb2.RegisterRequest.SerializeToString,
+            fleet__pb2.RegisterResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -1,8 +1,10 @@
 """Tests for GatewayServiceServicer — FleetGatewayService RPC handlers."""
 
+import logging
 import time
 import threading
 import queue
+from unittest.mock import MagicMock, patch
 
 import grpc
 import pytest
@@ -430,6 +432,49 @@ class TestGatewayServiceServicer:
         assert isinstance(result, BroadcastResult)
         assert len(result.results) == 0
 
+    def test_broadcast_command_concurrent_execution(self):
+        """BroadcastCommand executes targets concurrently (up to semaphore limit)."""
+        import time
+        servicer = self.create_servicer()
+        
+        registry = create_test_registry()
+        for i in range(10):
+            registry.register(f"m{i}", f"192.168.1.{i+10}", 5007)
+        auth_manager = create_test_auth_manager()
+        policy_engine = PolicyEngine()
+        servicer = GatewayServiceServicer(auth_manager, policy_engine, registry)
+
+        token = create_test_token({"sub": "admin1", "name": "Admin", "role": "admin"})
+        context = MockServicerContext(self.make_metadata(token))
+
+        call_times = []
+        
+        def slow_command(channel, machine_id, request, timeout=30.0):
+            """Simulate a slow gRPC call (200ms) and record start time."""
+            call_times.append(time.monotonic())
+            time.sleep(0.2)  # Simulate 200ms network latency
+            return Result(success=True, message="ok")
+        
+        servicer._execute_broadcast_command = slow_command
+
+        request = BroadcastRequest(
+            scope=BroadcastRequest.Scope.ALL,
+            mdi=MdiCommand(id=MachineId(id="m1"), command="G0 X1.0"),
+        )
+        start = time.monotonic()
+        result = servicer.BroadcastCommand(request, context)
+
+        elapsed = time.monotonic() - start
+
+        assert isinstance(result, BroadcastResult)
+        assert len(result.results) == 10
+        
+        # With semaphore=5 and 10 targets at 200ms each:
+        # Serial would take ~2.0s (10 × 0.2s)
+        # Concurrent (5 at a time) takes ~0.4s (2 batches × 0.2s)
+        # Allow generous margin: should be under 1.0s
+        assert elapsed < 1.0, f"Broadcast took {elapsed:.2f}s — expected <1.0s (semaphore not working?)"
+
     # --- SubscribeAllStatus ---
 
     def test_subscribe_all_status_unauthenticated(self):
@@ -529,6 +574,126 @@ class TestGatewayServiceServicer:
                 generator = servicer.SubscribeAllStatus(SubscribeAllRequest(), context)
                 results = list(generator)
         assert len(results) == 0
+
+    def test_subscribe_all_status_cleans_up_clients_from_cache(self):
+        """SubscribeAllStatus cleanup closes _GrpcClient objects so cached channels are not stale (M5)."""
+        from unittest.mock import MagicMock, patch
+
+        servicer = self.create_servicer()
+        registry = servicer.registry
+        registry.register("m1", "192.168.1.10", 5007)
+
+        token = create_test_token({"sub": "admin1", "name": "Admin", "role": "admin"})
+
+        class InactiveContext(MockServicerContext):
+            def __init__(self, metadata=None):
+                super().__init__(metadata)
+                self._active = False
+
+        context = InactiveContext(self.make_metadata(token))
+
+        mock_client = MagicMock()
+        mock_channel = MagicMock()
+        mock_client.connect.return_value = mock_channel
+
+        with patch.object(servicer, "_get_or_create_client", return_value=mock_client):
+            generator = servicer.SubscribeAllStatus(SubscribeAllRequest(), context)
+            results = list(generator)
+
+        mock_client.close.assert_called_once(), \
+            "Cleanup should call client.close() to evict stale channel references"
+
+    def test_grpc_client_reconnects_on_stale_channel(self):
+        """_GrpcClient.connect() detects closed channels and reconnects (M5)."""
+        from unittest.mock import MagicMock, patch
+
+        client = _GrpcClient("192.168.1.10", 5007)
+
+        # First connect creates a channel
+        ch1 = client.connect()
+        assert ch1 is not None
+        original_channel = ch1
+
+        # Mock check_connectivity_state to raise ValueError (simulating closed channel)
+        mock_cygrpc = MagicMock()
+        mock_cygrpc.check_connectivity_state.side_effect = ValueError("Cannot invoke RPC: Channel closed!")
+        with patch.object(ch1, "_channel", mock_cygrpc):
+            ch2 = client.connect()
+
+        assert ch2 is not None
+        assert ch2 is not original_channel, "Should create a fresh channel when cached one is stale"
+
+    def test_grpc_client_connects_when_none(self):
+        """_GrpcClient.connect() creates a new channel when _channel is None."""
+        client = _GrpcClient("192.168.1.10", 5007)
+        ch = client.connect()
+        assert ch is not None
+        assert client._channel is not None
+
+    def test_subscribe_all_status_queues_have_maxsize(self):
+        """SubscribeAllStatus creates bounded queues to prevent memory exhaustion (M6)."""
+        import queue
+
+        servicer = self.create_servicer()
+        registry = servicer.registry
+        registry.register("m1", "192.168.1.10", 5007)
+
+        token = create_test_token({"sub": "admin1", "name": "Admin", "role": "admin"})
+
+        class InactiveContext(MockServicerContext):
+            def __init__(self, metadata=None):
+                super().__init__(metadata)
+                self._active = False
+
+        context = InactiveContext(self.make_metadata(token))
+
+        mock_client = MagicMock()
+        mock_channel = MagicMock()
+        mock_client.connect.return_value.__enter__ = MagicMock(return_value=mock_channel)
+        mock_client.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_client.connect.return_value.__iter__ = MagicMock(return_value=iter([]))
+
+        with patch.object(servicer, "_get_or_create_client", return_value=mock_client):
+            generator = servicer.SubscribeAllStatus(SubscribeAllRequest(), context)
+            list(generator)
+
+    def test_subscribe_all_status_backpressure_bounded_queue(self):
+        """SubscribeAllStatus creates bounded queues with maxsize=100 (M6)."""
+        import queue as _queue_module
+
+        servicer = self.create_servicer()
+        registry = servicer.registry
+        registry.register("m1", "192.168.1.10", 5007)
+        registry.register("m2", "192.168.1.11", 5008)
+
+        token = create_test_token({"sub": "admin1", "name": "Admin", "role": "admin"})
+
+        class InactiveContext(MockServicerContext):
+            def __init__(self, metadata=None):
+                super().__init__(metadata)
+                self._active = False
+
+        context = InactiveContext(self.make_metadata(token))
+
+        mock_client1 = MagicMock()
+        mock_client2 = MagicMock()
+        mock_channel1 = MagicMock()
+        mock_channel2 = MagicMock()
+        mock_client1.connect.return_value.__enter__ = MagicMock(return_value=mock_channel1)
+        mock_client1.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_client1.connect.return_value.__iter__ = MagicMock(return_value=iter([]))
+        mock_client2.connect.return_value.__enter__ = MagicMock(return_value=mock_channel2)
+        mock_client2.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_client2.connect.return_value.__iter__ = MagicMock(return_value=iter([]))
+
+        def get_or_create_side_effect(entry):
+            if entry.id == "m1":
+                return mock_client1
+            return mock_client2
+
+        with patch.object(servicer, "_get_or_create_client", side_effect=get_or_create_side_effect):
+            generator = servicer.SubscribeAllStatus(SubscribeAllRequest(), context)
+            list(generator)
 
     def test_broadcast_command_program_path_error(self):
         """_execute_broadcast_command returns error when LoadProgram fails on sidecar."""
@@ -781,7 +946,7 @@ class TestExecuteBroadcastCommand:
         servicer = self.create_servicer()
 
         mock_stub = MagicMock()
-        mock_stub.MdiCommand.return_value = Result(success=True)
+        mock_stub.SendMdiCommand.return_value = Result(success=True)
 
         with patch("linuxcnc_fleet.fleet_pb2_grpc.FleetServiceStub", return_value=mock_stub):
             result = servicer._execute_broadcast_command(
@@ -790,7 +955,7 @@ class TestExecuteBroadcastCommand:
                 request=BroadcastRequest(mdi=MdiCommand(command="M3 S1000")),
             )
 
-        mock_stub.MdiCommand.assert_called_once()
+        mock_stub.SendMdiCommand.assert_called_once()
         assert result.success is True
 
     def test_exec_command_calls_set_execution(self):
@@ -874,7 +1039,7 @@ class TestExecuteBroadcastCommand:
 
         mock_stub = MagicMock()
         rpc_error = self._make_rpc_error("UNAVAILABLE: connection refused")
-        mock_stub.MdiCommand.side_effect = rpc_error
+        mock_stub.SendMdiCommand.side_effect = rpc_error
 
         with patch("linuxcnc_fleet.fleet_pb2_grpc.FleetServiceStub", return_value=mock_stub):
             result = servicer._execute_broadcast_command(
@@ -1173,3 +1338,63 @@ class TestRunGatewayServer:
 
         mock_server.stop.assert_called_once_with(grace=5)
         mock_registry.stop.assert_called_once()
+
+
+# ── M7: TLS/mTLS file I/O error handling ────────────────────────────────
+
+class TestGrpcClientBuildCredentials:
+    """Tests for _GrpcClient._build_credentials error handling (M7)."""
+
+    def test_missing_cert_file_raises_file_not_found(self, tmp_path):
+        key_path = str(tmp_path / "key.pem")
+        with open(key_path, "w") as f:
+            f.write("fake-key")
+
+        client = _GrpcClient(
+            "192.168.1.10", 5007,
+            tls_enabled=True,
+            cert_file=str(tmp_path / "nonexistent.pem"),
+            key_file=key_path,
+        )
+        with pytest.raises(FileNotFoundError, match="TLS certificate file not found"):
+            client._build_credentials()
+
+    def test_missing_key_file_raises_file_not_found(self, tmp_path):
+        cert_path = str(tmp_path / "cert.pem")
+        with open(cert_path, "w") as f:
+            f.write("fake-cert")
+
+        client = _GrpcClient(
+            "192.168.1.10", 5007,
+            tls_enabled=True,
+            cert_file=cert_path,
+            key_file=str(tmp_path / "nonexistent.pem"),
+        )
+        with pytest.raises(FileNotFoundError, match="TLS key file not found"):
+            client._build_credentials()
+
+    def test_missing_root_cert_file_raises_file_not_found(self, tmp_path):
+        cert_path = str(tmp_path / "cert.pem")
+        with open(cert_path, "w") as f:
+            f.write("fake-cert")
+        key_path = str(tmp_path / "key.pem")
+        with open(key_path, "w") as f:
+            f.write("fake-key")
+
+        client = _GrpcClient(
+            "192.168.1.10", 5007,
+            tls_enabled=True,
+            cert_file=cert_path,
+            key_file=key_path,
+            root_cert_file=str(tmp_path / "nonexistent-root.pem"),
+        )
+        with pytest.raises(FileNotFoundError, match="TLS root certificate file not found"):
+            client._build_credentials()
+
+    def test_no_tls_returns_none(self):
+        client = _GrpcClient("192.168.1.10", 5007, tls_enabled=False)
+        assert client._build_credentials() is None
+
+    def test_tls_enabled_but_no_cert_file_returns_none(self):
+        client = _GrpcClient("192.168.1.10", 5007, tls_enabled=True, cert_file=None)
+        assert client._build_credentials() is None

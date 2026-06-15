@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import ssl
 from typing import Any, Optional
 
@@ -19,15 +20,18 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_GATEWAY = os.environ.get("FLEET_UI_GATEWAY", "localhost:50052")
+
 
 # ── SSE Stream Manager ───────────────────────────────────────────────────────
 
 class _SSEStream:
     """Manages a single SSE client connection."""
 
-    def __init__(self, request: web.Request | None, machine_id: str = "") -> None:
+    def __init__(self, request: web.Request | None, machine_id: str = "", timeout: float = 120.0) -> None:
         self._request = request
         self.machine_id = machine_id
+        self._timeout = timeout
         self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
         self._done = False
 
@@ -41,7 +45,7 @@ class _SSEStream:
     async def _iter_lines(self) -> Any:
         while not self._done:
             try:
-                data = await asyncio.wait_for(self._queue.get(), timeout=120.0)
+                data = await asyncio.wait_for(self._queue.get(), timeout=self._timeout)
                 yield f"data: {json.dumps(data)}\n\n"
             except Exception:
                 break
@@ -61,11 +65,13 @@ class FleetApp:
         token: str,
         tls_enabled: bool = False,
         _mock_client: Any = None,
+        timeout: float = 120.0,
     ) -> None:
         self._gateway_address = gateway_address
         self._token = token
         self._tls_enabled = tls_enabled
         self._mock_client = _mock_client
+        self._timeout = timeout
         self._client: Optional[FleetClient] = None
         self._machines: list[MachineEntry] = []
         self._streams: dict[str, _SSEStream] = {}  # machine_id -> stream
@@ -258,6 +264,11 @@ class FleetApp:
             float_val = kwargs.get("float")
             u32_val = kwargs.get("u32")
             s32_val = kwargs.get("s32")
+
+            error_msg, _ = _validate_hal_write_args(bit=bit_val, float=float_val, u32=u32_val, s32=s32_val)
+            if error_msg:
+                return {"success": False, "message": error_msg}
+
             result = await client.write_hal_pin(
                 machine_id, pin_name,
                 bit_value=bit_val,
@@ -288,28 +299,50 @@ class FleetApp:
         client = await self._ensure_client()
 
         async def _stream_loop() -> None:
-            try:
-                async for status in client.subscribe_status(machine_id):
-                    data = _status_to_dict(status)
+            max_retries = 5
+            for attempt in range(max_retries + 1):
+                try:
+                    stream_ref = None
                     async with self._lock:
-                        self._last_status[machine_id] = data
-                    stream = app._streams.get(machine_id)
-                    if stream is not None:
-                        await stream.send(data)
-            except Exception as e:
-                log.error("Stream %s error: %s", machine_id, e)
+                        stream_ref = self._streams.get(machine_id)
+                    if stream_ref is not None and stream_ref._done:
+                        return
+                    async for status in client.subscribe_status(machine_id):
+                        data = _status_to_dict(status)
+                        stream = None
+                        async with self._lock:
+                            self._last_status[machine_id] = data
+                            stream = self._streams.get(machine_id)
+                        if stream is not None:
+                            await stream.send(data)
+                            if stream._done:
+                                return
+                except Exception as e:
+                    log.error("Stream %s error (attempt %d/%d): %s", machine_id, attempt + 1, max_retries + 1, e)
+                    stream = None
+                    async with self._lock:
+                        stream = self._streams.get(machine_id)
+                    if stream is not None and not stream._done:
+                        wait = min(2 ** attempt, 30)
+                        log.info("Reconnecting to %s in %ds...", machine_id, wait)
+                        await asyncio.sleep(wait)
+                    else:
+                        return
+                else:
+                    break
 
-        stream = _SSEStream(None, machine_id=machine_id)
+        stream = _SSEStream(None, machine_id=machine_id, timeout=self._timeout)
         async with self._lock:
             self._streams[machine_id] = stream
 
         asyncio.create_task(_stream_loop())
         return stream
 
-    def remove_stream(self, machine_id: str) -> None:
-        if machine_id in self._streams:
-            self._streams[machine_id].close()
-            del self._streams[machine_id]
+    async def remove_stream(self, machine_id: str) -> None:
+        async with self._lock:
+            if machine_id in self._streams:
+                self._streams[machine_id].close()
+                del self._streams[machine_id]
 
     async def stream_all_machines(self) -> _SSEStream:
         app = self
@@ -320,28 +353,50 @@ class FleetApp:
         machine_ids = [m["machine_id"] for m in machines_data]
 
         async def _stream_loop() -> None:
-            try:
-                async for machine_id, status in client.subscribe_all_status():
-                    data = _status_to_dict(status)
+            max_retries = 5
+            for attempt in range(max_retries + 1):
+                try:
+                    stream_ref = None
                     async with self._lock:
-                        self._last_status[machine_id] = data
-                    stream = app._streams.get("__all__")
-                    if stream is not None:
-                        await stream.send(data)
-            except Exception as e:
-                log.error("StreamAll error: %s", e)
+                        stream_ref = self._streams.get("__all__")
+                    if stream_ref is not None and stream_ref._done:
+                        return
+                    async for machine_id, status in client.subscribe_all_status():
+                        data = _status_to_dict(status)
+                        stream = None
+                        async with self._lock:
+                            self._last_status[machine_id] = data
+                            stream = self._streams.get("__all__")
+                        if stream is not None:
+                            await stream.send(data)
+                            if stream._done:
+                                return
+                except Exception as e:
+                    log.error("StreamAll error (attempt %d/%d): %s", attempt + 1, max_retries + 1, e)
+                    stream = None
+                    async with self._lock:
+                        stream = self._streams.get("__all__")
+                    if stream is not None and not stream._done:
+                        wait = min(2 ** attempt, 30)
+                        log.info("Reconnecting in %ds...", wait)
+                        await asyncio.sleep(wait)
+                    else:
+                        return
+                else:
+                    break
 
-        stream = _SSEStream(None, machine_id="__all__")
+        stream = _SSEStream(None, machine_id="__all__", timeout=self._timeout)
         async with self._lock:
             self._streams["__all__"] = stream
 
         asyncio.create_task(_stream_loop())
         return stream
 
-    def remove_all_stream(self) -> None:
-        if "__all__" in self._streams:
-            self._streams["__all__"].close()
-            del self._streams["__all__"]
+    async def remove_all_stream(self) -> None:
+        async with self._lock:
+            if "__all__" in self._streams:
+                self._streams["__all__"].close()
+                del self._streams["__all__"]
 
     async def get_last_status(self, machine_id: str) -> Optional[dict]:
         async with self._lock:
@@ -427,7 +482,10 @@ def _mode_to_int(mode: str) -> int:
         "AUTO": Mode.MODE_AUTO,
         "MDA": Mode.MODE_MDA,
     }
-    return mapping.get(mode.upper(), 0)
+    upper = mode.upper()
+    if upper not in mapping:
+        raise ValueError(f"Unknown machine mode: {mode!r}. Valid modes: MANUAL, AUTO, MDA")
+    return mapping[upper]
 
 
 def _hal_type_to_str(t: int) -> str:
@@ -436,6 +494,39 @@ def _hal_type_to_str(t: int) -> str:
         return HalPinType.Name(t)
     except Exception:
         return f"UNKNOWN({t})"
+
+
+def _validate_hal_write_args(**kwargs) -> tuple[None, None] | tuple[str, int]:
+    """Validate HAL pin write arguments. Returns (error_msg, status_code) on failure."""
+    bit_val = kwargs.get("bit", None)
+    float_val = kwargs.get("float", None)
+    u32_val = kwargs.get("u32", None)
+    s32_val = kwargs.get("s32", None)
+
+    provided_types = [k for k in ("bit", "float", "u32", "s32") if kwargs.get(k) is not None]
+    if len(provided_types) == 0:
+        return ("Exactly one of bit, float, u32, or s32 must be provided", 400)
+    if len(provided_types) > 1:
+        return (f"Multiple value types provided ({', '.join(provided_types)}). Only one is allowed.", 400)
+
+    if "bit" in provided_types:
+        if not isinstance(bit_val, bool):
+            return (f"bit must be a boolean, got {type(bit_val).__name__}", 400)
+    elif "float" in provided_types:
+        if not isinstance(float_val, (int, float)):
+            return (f"float must be a number, got {type(float_val).__name__}", 400)
+    elif "u32" in provided_types:
+        if not isinstance(u32_val, int) or isinstance(u32_val, bool):
+            return (f"u32 must be an integer, got {type(u32_val).__name__}", 400)
+        if not (0 <= u32_val <= 4294967295):
+            return (f"u32 must be in range 0-4294967295, got {u32_val}", 400)
+    elif "s32" in provided_types:
+        if not isinstance(s32_val, int) or isinstance(s32_val, bool):
+            return (f"s32 must be an integer, got {type(s32_val).__name__}", 400)
+        if not (-2147483648 <= s32_val <= 2147483647):
+            return (f"s32 must be in range -2147483648 to 2147483647, got {s32_val}", 400)
+
+    return None, None
 
 
 # ── HTML Template ────────────────────────────────────────────────────────────
@@ -840,10 +931,10 @@ main {
     <div class="config-form">
       <h2 style="margin-bottom: 8px;">Connect to Fleet Gateway</h2>
       <label>Gateway Address</label>
-      <input id="cfg-gateway" type="text" value="localhost:50052" placeholder="host:port">
+      <input id="cfg-gateway" type="text" value="{{gateway}}" placeholder="host:port">
 
       <label>JWT Token</label>
-      <input id="cfg-token" type="text" placeholder="eyJhbGciOiJIUzI1NiIs...">
+      <input id="cfg-token" type="text" value="{{token}}" placeholder="eyJhbGciOiJIUzI1NiIs...">
 
       <label>TLS Enabled</label>
       <select id="cfg-tls">
@@ -982,6 +1073,18 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// ── Auto-connect if token pre-provided ────────────────────────────────────────
+(function() {
+  var gateway = '{{gateway}}';
+  var token = '{{token}}';
+  var autoConnect = '{{auto_connect}}' === 'true';
+  if (autoConnect && gateway && token) {
+    document.getElementById('cfg-gateway').value = gateway;
+    document.getElementById('cfg-token').value = token;
+    connect();
+  }
+})();
+
 // ── Config ───────────────────────────────────────────────────────────────────
 async function connect() {
   const gateway = document.getElementById('cfg-gateway').value.trim();
@@ -1034,8 +1137,8 @@ async function refreshMachines() {
       const modeDisplay = escapeHtml(lastStatus.mode || 'unknown');
       const estopDisplay = lastStatus.estop_state === 'E_STOPPED' ? 'E-STOP' : 'OK';
       item.innerHTML = `
-        <input type="checkbox" class="machine-checkbox" ${isChecked ? 'checked' : ''} onclick="event.stopPropagation();toggleSelect('${escapeHtml(m.machine_id)}', event)" onkeydown="event.stopPropagation()">
-        <div class="machine-dot ${dotClass}"></div>
+         <input type="checkbox" class="machine-checkbox" ${isChecked ? 'checked' : ''} onclick="event.stopPropagation();toggleSelect('${escapeHtml(m.machine_id).replace(/'/g, "\\'").replace(/"/g, '&quot;')}', event)" onkeydown="event.stopPropagation()">
+         <div class="machine-dot ${dotClass}"></div>
         <div>
           <div class="machine-name">${displayName}</div>
           <div class="machine-detail">${modeDisplay} · ${estopDisplay}</div>
@@ -1179,12 +1282,12 @@ function updateStatusDisplay(status) {
 
   const cards = document.getElementById('status-cards');
   cards.innerHTML = `
-    <div class="status-card"><div class="label">State</div><div class="value ${getStatusClass(status.state)}">${status.state}</div></div>
-    <div class="status-card"><div class="label">Mode</div><div class="value">${status.mode}</div></div>
-    <div class="status-card"><div class="label">Execution</div><div class="value">${status.execution}</div></div>
-    <div class="status-card"><div class="label">E-Stop</div><div class="value ${status.estop_state === 'E_STOPPED' ? 'estop' : ''}">${status.estop_state}</div></div>
-    <div class="status-card"><div class="label">Interp State</div><div class="value">${status.interp_state}</div></div>
-    <div class="status-card"><div class="label">Program</div><div class="value" style="font-size:14px;word-break:break-all;">${status.program_file || '(none)'}</div></div>
+    <div class="status-card"><div class="label">State</div><div class="value ${getStatusClass(status.state)}">${escapeHtml(status.state)}</div></div>
+    <div class="status-card"><div class="label">Mode</div><div class="value">${escapeHtml(status.mode)}</div></div>
+    <div class="status-card"><div class="label">Execution</div><div class="value">${escapeHtml(status.execution)}</div></div>
+    <div class="status-card"><div class="label">E-Stop</div><div class="value ${status.estop_state === 'E_STOPPED' ? 'estop' : ''}">${escapeHtml(status.estop_state)}</div></div>
+    <div class="status-card"><div class="label">Interp State</div><div class="value">${escapeHtml(status.interp_state)}</div></div>
+    <div class="status-card"><div class="label">Program</div><div class="value" style="font-size:14px;word-break:break-all;">${escapeHtml(status.program_file || '(none)')}</div></div>
     <div class="status-card"><div class="label">Feedrate</div><div class="value">${status.feedrate.toFixed(0)} mm/min</div></div>
     <div class="status-card"><div class="label">Spindle</div><div class="value">${status.spindle_speed.toFixed(0)} RPM</div></div>
   `;
@@ -1200,7 +1303,7 @@ function updateStatusDisplay(status) {
   // Detail header
   document.getElementById('detail-status').innerHTML = `
     <span class="machine-dot ${getStatusClassDot(status.state)}" style="display:inline-block;margin-right:8px;"></span>
-    ${status.state} · ${status.estop_state === 'E_STOPPED' ? '<span style="color:var(--accent-red)">E-STOP</span>' : 'Ready'}
+    ${escapeHtml(status.state)} · ${status.estop_state === 'E_STOPPED' ? '<span style="color:var(--accent-red)">E-STOP</span>' : 'Ready'}
   `;
 
   // Update coolant indicators
@@ -1455,15 +1558,19 @@ async function refreshHAL() {
 
     let html = '';
     components.forEach(comp => {
-      html += `<table class="hal-table"><tr class="hal-component-header"><td colspan="5">${comp.name}</td></tr>`;
+      const safeCompName = escapeHtml(comp.name);
+      html += `<table class="hal-table"><tr class="hal-component-header"><td colspan="5">${safeCompName}</td></tr>`;
       comp.pins.forEach(pin => {
         const val = pin.type === 'PIN_TYPE_BIT' ? (pin.value_bit ? '1' : '0') :
                     pin.type === 'PIN_TYPE_U32' ? pin.value_u32 :
                     pin.type === 'PIN_TYPE_S32' ? pin.value_s32 :
                     pin.value_f.toFixed(4);
         const dir = pin.is_output ? '<span style="color:var(--accent-green)">OUT</span>' : '<span style="color:var(--text-secondary)">IN</span>';
-        html += `<tr><td>${pin.name}</td><td>${pin.type.replace('PIN_TYPE_', '')}</td><td>${dir}</td><td>${val}</td>
-          ${pin.is_output ? `<td><button class="btn" style="padding:4px 8px;font-size:12px;" onclick="readPin('${pin.name}')">Read</button></td>` : '<td></td>'}
+        const safePinName = escapeHtml(pin.name);
+        const safePinNameAttr = safePinName.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        const typeLabel = escapeHtml(pin.type.replace('PIN_TYPE_', ''));
+        html += `<tr><td>${safePinName}</td><td>${typeLabel}</td><td>${dir}</td><td>${val}</td>
+          ${pin.is_output ? `<td><button class="btn" style="padding:4px 8px;font-size:12px;" onclick="readPin('${safePinNameAttr}')">Read</button></td>` : '<td></td>'}
         </tr>`;
       });
       html += '</table>';
@@ -1539,12 +1646,22 @@ setInterval(refreshMachines, 5000);
 # ── aiohttp Handlers ─────────────────────────────────────────────────────────
 
 async def handle_index(request: web.Request) -> web.Response:
-    return web.Response(text=HTML_TEMPLATE, content_type='text/html')
+    args = request.app['args']
+    auto_connect = bool(args.token)  # skip config form if token provided
+    template_vars = {
+        'gateway': args.gateway,
+        'token': args.token or '',
+        'auto_connect': str(auto_connect).lower(),
+    }
+    html = HTML_TEMPLATE
+    for key, val in template_vars.items():
+        html = html.replace(f'{{{{{key}}}}}', val)
+    return web.Response(text=html, content_type='text/html')
 
 
 async def handle_connect(request: web.Request) -> web.Response:
     """Initialize FleetClient with provided token."""
-    gateway = request.query.get('gateway', 'localhost:50052')
+    gateway = request.query.get('gateway', _DEFAULT_GATEWAY)
     tls = request.query.get('tls', 'false').lower() == 'true'
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
 
@@ -1610,17 +1727,29 @@ async def handle_stream(request: web.Request) -> web.Response:
         except Exception as e:
             log.debug("Stream client disconnected: %s", e)
         finally:
-            app_state.remove_stream(machine_id)
+            await app_state.remove_stream(machine_id)
 
-    return web.AsyncIterableResponse(
-        _stream_generator(),
+    origin = request.headers.get('Origin')
+    cors_headers = {}
+    if origin:
+        port = request.app['args'].port
+        allowed_origins = [f'http://localhost:{port}']
+        if origin in allowed_origins or origin == 'null':
+            cors_headers['Access-Control-Allow-Origin'] = origin
+            cors_headers['Access-Control-Allow-Credentials'] = 'true'
+
+    resp = web.StreamResponse(
         headers={
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
+            **cors_headers,
         },
     )
+    await resp.prepare(request)
+    async for data in _stream_generator():
+        await resp.write(data.encode())
+    return resp
 
 
 async def handle_stream_all(request: web.Request) -> web.Response:
@@ -1646,17 +1775,29 @@ async def handle_stream_all(request: web.Request) -> web.Response:
         except Exception as e:
             log.debug("StreamAll client disconnected: %s", e)
         finally:
-            app_state.remove_all_stream()
+            await app_state.remove_all_stream()
 
-    return web.AsyncIterableResponse(
-        _stream_generator(),
+    origin = request.headers.get('Origin')
+    cors_headers = {}
+    if origin:
+        port = request.app['args'].port
+        allowed_origins = [f'http://localhost:{port}']
+        if origin in allowed_origins or origin == 'null':
+            cors_headers['Access-Control-Allow-Origin'] = origin
+            cors_headers['Access-Control-Allow-Credentials'] = 'true'
+
+    resp = web.StreamResponse(
         headers={
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
+            **cors_headers,
         },
     )
+    await resp.prepare(request)
+    async for data in _stream_generator():
+        await resp.write(data.encode())
+    return resp
 
 
 async def handle_info(request: web.Request) -> web.Response:
@@ -1781,6 +1922,12 @@ async def handle_hal_write(request: web.Request) -> web.Response:
     except json.JSONDecodeError:
         return web.json_response({'error': 'Invalid JSON'}, status=400)
 
+    # Validate that exactly one value type is provided and types/ranges are correct
+    validation_keys = {k: body[k] for k in ('bit', 'float', 'u32', 's32') if k in body}
+    error_msg, status_code = _validate_hal_write_args(**validation_keys)
+    if error_msg:
+        return web.json_response({'error': error_msg}, status=status_code)
+
     result = await app_state.write_hal_pin(
         machine_id, pin_name,
         bit=body.get('bit'),
@@ -1825,12 +1972,16 @@ def create_routes(app: web.Application) -> None:
 # ── CLI Entry Point ──────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
+    import os
     parser = argparse.ArgumentParser(description='LinuxCNC Fleet Dashboard UI')
-    parser.add_argument('--gateway', default='localhost:50052', help='Gateway address (host:port)')
-    parser.add_argument('--token', default=None, help='JWT token for authentication')
-    parser.add_argument('--port', type=int, default=8080, help='HTTP listen port')
-    parser.add_argument('--tls-cert', default=None, help='TLS certificate path (PEM)')
-    parser.add_argument('--tls-key', default=None, help='TLS private key path (PEM)')
+    parser.add_argument('--gateway', default=os.environ.get('FLEET_UI_GATEWAY', 'localhost:50052'), help='Gateway address (host:port)')
+    parser.add_argument('--token', default=os.environ.get('FLEET_UI_TOKEN'), help='JWT token for authentication')
+    parser.add_argument('--bind', default='0.0.0.0', help='Bind address (default: 0.0.0.0 for all interfaces)')
+    parser.add_argument('--port', type=int, default=int(os.environ.get('FLEET_UI_PORT', '8080')), help='HTTP listen port')
+    parser.add_argument('--allow-origin', default=os.environ.get('FLEET_UI_ALLOW_ORIGIN', '*'), help='CORS allowed origin (default: * for all, or specific URL like http://example.com)')
+    parser.add_argument('--tls-cert', default=os.environ.get('FLEET_UI_TLS_CERT'), help='TLS certificate path (PEM)')
+    parser.add_argument('--tls-key', default=os.environ.get('FLEET_UI_TLS_KEY'), help='TLS private key path (PEM)')
+    parser.add_argument('--timeout', type=int, default=int(os.environ.get('FLEET_UI_TIMEOUT', '120')), help='HTTP request timeout in seconds (default: 120)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable debug logging')
     return parser.parse_args()
 
@@ -1842,6 +1993,7 @@ async def on_startup(app: web.Application) -> None:
         gateway_address=args.gateway,
         token=args.token or '',
         tls_enabled=bool(args.tls_cert),
+        timeout=float(args.timeout),
     )
     try:
         await fleet_app.init()
@@ -1869,7 +2021,6 @@ def main() -> None:
 
     app = web.Application()
     app['args'] = args
-    app.router.add_get('/', handle_index)
     create_routes(app)
 
     app.on_startup.append(on_startup)
@@ -1879,9 +2030,18 @@ def main() -> None:
     @web.middleware
     async def cors_middleware(request: web.Request, handler):
         response = await handler(request)
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        origin = request.headers.get('Origin')
+        if origin:
+            if args.allow_origin == '*':
+                response.headers['Access-Control-Allow-Origin'] = origin
+            elif origin == args.allow_origin or origin == 'null':
+                response.headers['Access-Control-Allow-Origin'] = origin
+            else:
+                # Reject cross-origin requests to a specific allowed origin
+                return web.json_response({'error': 'Origin not allowed'}, status=403, content_type='application/json')
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
         if request.method == 'OPTIONS':
             return web.Response(status=204)
         return response
@@ -1895,8 +2055,8 @@ def main() -> None:
         ssl_ctx.load_cert_chain(args.tls_cert, args.tls_key)
         ssl_context = ssl_ctx
 
-    log.info("Starting Fleet Dashboard on :%d", args.port)
-    web.run_app(app, host='0.0.0.0', port=args.port, ssl_context=ssl_context)
+    log.info("Starting Fleet Dashboard on %s:%d (timeout: %ds)", args.bind, args.port, args.timeout)
+    web.run_app(app, host=args.bind, port=args.port, ssl_context=ssl_context, keepalive_timeout=args.timeout)
 
 
 if __name__ == '__main__':

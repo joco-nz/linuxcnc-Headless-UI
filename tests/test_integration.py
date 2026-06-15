@@ -5,6 +5,7 @@ then exercises end-to-end paths that unit tests cannot reach: serialization,
 channel setup, auth interceptor chaining, broadcast fan-out.
 """
 
+import asyncio
 import grpc
 import pytest
 
@@ -587,3 +588,93 @@ class TestRegistryHeartbeat:
         _time.sleep(0.6)
 
         assert registry.lookup("test-expire") is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: SetMachineState (admin-only machine state control)
+# ---------------------------------------------------------------------------
+
+class TestSetMachineState:
+    """End-to-end: SetMachineState RPC with auth enforcement via FleetClient."""
+
+    def test_set_machine_state_admin_allowed(self, gateway_server):
+        """Admin can set machine state via FleetClient end-to-end."""
+        gw_port, registry, stop_sidecar, stop_gw = gateway_server
+
+        from unittest.mock import AsyncMock, MagicMock
+        from fleet_client.client import FleetClient
+
+        mock_result = MagicMock(success=True, message="Machine state set to 3", error_code=0)
+
+        gateway_stub_mock = AsyncMock()
+        gateway_stub_mock.RouteMachine = AsyncMock(
+            return_value=MagicMock(instance_address="127.0.0.1", instance_port=5005)
+        )
+
+        fleet_stub_mock = AsyncMock()
+        fleet_stub_mock.SetMachineState = AsyncMock(return_value=mock_result)
+
+        client = FleetClient(
+            gateway_address=f"127.0.0.1:{gw_port}",
+            token=_make_admin_token(),
+            tls_enabled=False,
+            _gateway_stub=gateway_stub_mock,
+            _fleet_stub_factory=lambda ch: fleet_stub_mock,
+        )
+
+        result = asyncio.run(client.set_machine_state("integration-machine-1", 3))
+
+        assert result.success is True
+        assert "state set" in result.message.lower()
+        fleet_stub_mock.SetMachineState.assert_called_once()
+
+    def test_set_machine_state_via_sidecar_direct(self, sidecar_server):
+        """SetMachineState via direct sidecar connection (simulating gateway routing)."""
+        port, sidecar, stop = sidecar_server
+
+        channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+        stub = FleetServiceStub(channel)
+
+        from linuxcnc_fleet.fleet_pb2 import MachineStateCommand
+
+        result = stub.SetMachineState(
+            MachineStateCommand(
+                id=MachineId(id="integration-machine-1"),
+                state=3,  # STATE_ON
+            )
+        )
+
+        assert result.success is True
+        assert "state set" in result.message.lower()
+
+        channel.close()
+
+    def test_set_machine_state_delegates_to_sidecar(self):
+        """SetMachineState properly delegates to LinuxCncSidecar.set_machine_state()."""
+        from linuxcnc_fleet.headless import LinuxCncSidecar
+        from linuxcnc_fleet.server import FleetServiceRPC
+        from linuxcnc_fleet.fleet_pb2 import MachineStateCommand, MachineId
+
+        sidecar = LinuxCncSidecar(machine_id="test", ini_path="/fake.ini")
+        rpc = FleetServiceRPC(sidecar)
+        sidecar.run()
+
+        class MockContext:
+            def abort(self, code, detail):
+                self._code = code
+                self._detail = detail
+
+        ctx = MockContext()
+        request = MachineStateCommand(
+            id=MachineId(id="test"),
+            state=3,  # STATE_ON
+        )
+
+        result = rpc.SetMachineState(request, ctx)
+
+        assert result.success is True
+
+        calls = getattr(sidecar._command, '_calls', [])
+        assert ("state", 3) in calls
+
+        sidecar.shutdown()

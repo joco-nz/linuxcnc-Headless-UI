@@ -11,9 +11,12 @@ from typing import Any, AsyncGenerator, Optional
 
 import grpc
 
-from fleet_client.auth import BearerAuthInterceptor, create_auth_interceptor
+from fleet_client.auth import create_aio_auth_interceptor
+from linuxcnc_fleet.fleet_pb2_grpc import FleetGatewayServiceStub as _SyncFleetGatewayServiceStub
+from linuxcnc_fleet.fleet_pb2_grpc import FleetServiceStub as _SyncFleetServiceStub
 from linuxcnc_fleet.fleet_pb2 import (
     BroadcastRequest,
+    BroadcastResult,
     DiscoverRequest,
     Empty,
     ErrorEvent,
@@ -34,19 +37,278 @@ from linuxcnc_fleet.fleet_pb2 import (
     IniParamValue,
     ListHalRequest,
     ListProgramsRequest,
-    ProgramList,
+    MachineControlState,
     MachineId,
     MachineInfo,
+    MachineList,
+    MachineStateCommand,
     MachineStatus,
     MdiCommand,
     PositionRequest,
     PositionResponse,
-    ProgramPath,
+    ProgramEntry,
+    ProgramList,
+   ProgramPath,
+    RegisterRequest,
+    RegisterResponse,
     Result,
     SetModeRequest,
     SubscribeAllRequest,
     TrajAxis,
 )
+
+
+def _error_details(e: BaseException) -> str:
+    """Safely extract error details from gRPC or non-gRPC exceptions."""
+    if hasattr(e, 'details'):
+        return e.details()
+    return str(e)
+
+
+def _serialize_request(req: Any) -> bytes:
+    """Serialize a protobuf request to bytes."""
+    if hasattr(req, 'SerializeToString'):
+        return req.SerializeToString()
+    return req
+
+
+class _AioFleetGatewayServiceStub:
+    """Aio-compatible wrapper around the sync FleetGatewayServiceStub."""
+
+    def __init__(self, channel: grpc.aio.Channel) -> None:
+        self._channel = channel
+        self._discover_machines = channel.unary_unary(
+            '/linuxcnc_fleet.FleetGatewayService/DiscoverMachines',
+            request_serializer=_serialize_request,
+            response_deserializer=MachineList.FromString,
+        )
+        self._route_machine = channel.unary_unary(
+            '/linuxcnc_fleet.FleetGatewayService/RouteMachine',
+            request_serializer=_serialize_request,
+            response_deserializer=GatewayRoute.FromString,
+        )
+        self._broadcast_command = channel.unary_unary(
+            '/linuxcnc_fleet.FleetGatewayService/BroadcastCommand',
+            request_serializer=_serialize_request,
+            response_deserializer=BroadcastResult.FromString,
+        )
+        self._register_machine = channel.unary_unary(
+            '/linuxcnc_fleet.FleetGatewayService/RegisterMachine',
+            request_serializer=_serialize_request,
+            response_deserializer=RegisterResponse.FromString,
+        )
+
+    async def DiscoverMachines(self, request: DiscoverRequest, **kwargs: Any) -> Any:
+        return await self._discover_machines(request, **kwargs)
+
+    async def RouteMachine(self, request: MachineId, **kwargs: Any) -> GatewayRoute:
+        return await self._route_machine(request, **kwargs)
+
+    async def BroadcastCommand(self, request: BroadcastRequest, **kwargs: Any) -> Any:
+        return await self._broadcast_command(request, **kwargs)
+
+    async def RegisterMachine(self, request: RegisterRequest, **kwargs: Any) -> RegisterResponse:
+        return await self._register_machine(request, **kwargs)
+
+
+class _AioFleetServiceStub:
+    """Aio-compatible wrapper around the sync FleetServiceStub."""
+
+    def __init__(self, channel: grpc.aio.Channel) -> None:
+        self._channel = channel
+        self._get_status = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/GetStatus',
+            request_serializer=_serialize_request,
+            response_deserializer=MachineStatus.FromString,
+        )
+        self._set_mode = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/SetMode',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._set_execution = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/SetExecution',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._start = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/Start',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._stop = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/Stop',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._feed_hold = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/FeedHold',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._continue_exec = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/ContinueExec',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._home_all = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/HomeAll',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._step_forward = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/StepForward',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._send_mdi = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/SendMDI',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._home_axis = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/HomeAxis',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._load_program = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/LoadProgram',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._get_position = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/GetPosition',
+            request_serializer=_serialize_request,
+            response_deserializer=PositionResponse.FromString,
+        )
+        self._list_hal_components = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/ListHalComponents',
+            request_serializer=_serialize_request,
+            response_deserializer=HalComponentList.FromString,
+        )
+        self._read_hal_pin = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/ReadHalPin',
+            request_serializer=_serialize_request,
+            response_deserializer=HalPinValue.FromString,
+        )
+        self._write_hal_pin = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/WriteHalPin',
+            request_serializer=_serialize_request,
+            response_deserializer=Result.FromString,
+        )
+        self._get_errors = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/GetErrors',
+            request_serializer=_serialize_request,
+            response_deserializer=ErrorList.FromString,
+        )
+        self._get_machine_info = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/GetMachineInfo',
+            request_serializer=_serialize_request,
+            response_deserializer=MachineInfo.FromString,
+        )
+        self._get_ini_param = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/GetIniParam',
+            request_serializer=_serialize_request,
+            response_deserializer=IniParamValue.FromString,
+        )
+        self._list_programs = channel.unary_unary(
+            '/linuxcnc_fleet.FleetService/ListPrograms',
+            request_serializer=_serialize_request,
+            response_deserializer=ProgramList.FromString,
+        )
+        self._subscribe_status = channel.unary_stream(
+            '/linuxcnc_fleet.FleetService/SubscribeStatus',
+            request_serializer=_serialize_request,
+            response_deserializer=MachineStatus.FromString,
+        )
+        self._subscribe_hal_pins = channel.unary_stream(
+            '/linuxcnc_fleet.FleetService/SubscribeHalPins',
+            request_serializer=_serialize_request,
+            response_deserializer=HalPinUpdate.FromString,
+        )
+        self._subscribe_errors = channel.unary_stream(
+            '/linuxcnc_fleet.FleetService/SubscribeErrors',
+            request_serializer=_serialize_request,
+            response_deserializer=ErrorEvent.FromString,
+        )
+        self._subscribe_all_status = channel.unary_stream(
+            '/linuxcnc_fleet.FleetService/SubscribeAllStatus',
+            request_serializer=_serialize_request,
+            response_deserializer=MachineStatus.FromString,
+        )
+
+    async def GetStatus(self, request: MachineId, **kwargs: Any) -> MachineStatus:
+        return await self._get_status(request, **kwargs)
+
+    async def SetMode(self, request: SetModeRequest, **kwargs: Any) -> Result:
+        return await self._set_mode(request, **kwargs)
+
+    async def SetExecution(self, request: ExecutionCommand, **kwargs: Any) -> Result:
+        return await self._set_execution(request, **kwargs)
+
+    async def Start(self, request: MachineId, **kwargs: Any) -> Result:
+        return await self._start(request, **kwargs)
+
+    async def Stop(self, request: MachineId, **kwargs: Any) -> Result:
+        return await self._stop(request, **kwargs)
+
+    async def FeedHold(self, request: MachineId, **kwargs: Any) -> Result:
+        return await self._feed_hold(request, **kwargs)
+
+    async def ContinueExec(self, request: MachineId, **kwargs: Any) -> Result:
+        return await self._continue_exec(request, **kwargs)
+
+    async def HomeAll(self, request: MachineId, **kwargs: Any) -> Result:
+        return await self._home_all(request, **kwargs)
+
+    async def StepForward(self, request: MachineId, **kwargs: Any) -> Result:
+        return await self._step_forward(request, **kwargs)
+
+    async def SendMDI(self, request: MdiCommand, **kwargs: Any) -> Result:
+        return await self._send_mdi(request, **kwargs)
+
+    async def HomeAxis(self, request: HomeAxisRequest, **kwargs: Any) -> Result:
+        return await self._home_axis(request, **kwargs)
+
+    async def LoadProgram(self, request: ProgramPath, **kwargs: Any) -> Result:
+        return await self._load_program(request, **kwargs)
+
+    async def GetPosition(self, request: PositionRequest, **kwargs: Any) -> PositionResponse:
+        return await self._get_position(request, **kwargs)
+
+    async def ListHalComponents(self, request: ListHalRequest, **kwargs: Any) -> HalComponentList:
+        return await self._list_hal_components(request, **kwargs)
+
+    async def ReadHalPin(self, request: HalPinRead, **kwargs: Any) -> HalPinValue:
+        return await self._read_hal_pin(request, **kwargs)
+
+    async def WriteHalPin(self, request: HalPinWrite, **kwargs: Any) -> Result:
+        return await self._write_hal_pin(request, **kwargs)
+
+    async def GetErrors(self, request: GetErrorsRequest, **kwargs: Any) -> ErrorList:
+        return await self._get_errors(request, **kwargs)
+
+    async def GetMachineInfo(self, request: MachineId, **kwargs: Any) -> MachineInfo:
+        return await self._get_machine_info(request, **kwargs)
+
+    async def GetIniParam(self, request: IniParamRequest, **kwargs: Any) -> IniParamValue:
+        return await self._get_ini_param(request, **kwargs)
+
+    async def ListPrograms(self, request: ListProgramsRequest, **kwargs: Any) -> ProgramList:
+        return await self._list_programs(request, **kwargs)
+
+    async def SubscribeStatus(self, request: MachineId, **kwargs: Any) -> Any:
+        return self._subscribe_status(request, **kwargs)
+
+    async def SubscribeHalPins(self, request: HalPinSubscribe, **kwargs: Any) -> Any:
+        return self._subscribe_hal_pins(request, **kwargs)
+
+    async def SubscribeErrors(self, request: MachineId, **kwargs: Any) -> Any:
+        return self._subscribe_errors(request, **kwargs)
+
+    async def SubscribeAllStatus(self, request: SubscribeAllRequest, **kwargs: Any) -> Any:
+        return self._subscribe_all_status(request, **kwargs)
+
 
 # Read-only RPCs eligible for retry
 _READ_ONLY_RPC = frozenset({
@@ -123,17 +385,14 @@ class FleetClient:
         self._machine_channel_ttl = machine_channel_ttl
         self._closed = False
         
-        # Gateway channel with auth interceptor
+        # Gateway channel with auth interceptor (created lazily)
         if _gateway_channel is not None:
             self._gateway_channel = _gateway_channel
         else:
-            self._gateway_channel = self._create_gateway_channel()
-        if _gateway_stub is not None:
-            self._gateway_stub = _gateway_stub
-        else:
-            self._gateway_stub = grpc.aio.FleetGatewayServiceStub(self._gateway_channel)
+            self._gateway_channel = None
+        self._gateway_stub = _gateway_stub
         self._fleet_stub_factory = _fleet_stub_factory or (
-            lambda ch: grpc.aio.FleetServiceStub(ch)
+            lambda ch: _AioFleetServiceStub(ch)
         )
         
         # Machine channel cache
@@ -145,18 +404,19 @@ class FleetClient:
 
     def _create_gateway_channel(self) -> grpc.Channel:
         """Create the gRPC channel to the gateway server."""
-        auth_interceptor = create_auth_interceptor(self._token)
+        auth_interceptor = create_aio_auth_interceptor(self._token)
         if self._tls_enabled:
             creds = grpc.ssl_channel_credentials()
-            channel = grpc.secure_channel(
+            return grpc.aio.secure_channel(
                 self._gateway_address,
                 creds,
+                interceptors=[auth_interceptor],
             )
         else:
-            channel = grpc.insecure_channel(
+            return grpc.aio.insecure_channel(
                 self._gateway_address,
+                interceptors=[auth_interceptor],
             )
-        return grpc.intercept_channel(channel, auth_interceptor)
 
     async def _get_or_create_machine_channel(
         self, address: str, port: int
@@ -188,13 +448,16 @@ class FleetClient:
             # Create new channel
             if self._tls_enabled:
                 creds = grpc.ssl_channel_credentials()
-                channel = grpc.secure_channel(
+                channel = grpc.aio.secure_channel(
                     f"{address}:{port}",
                     creds,
-                    interceptors=[create_auth_interceptor(self._token)],
+                    interceptors=[create_aio_auth_interceptor(self._token)],
                 )
             else:
-                channel = grpc.insecure_channel(f"{address}:{port}")
+                channel = grpc.aio.insecure_channel(
+                    f"{address}:{port}",
+                    interceptors=[create_aio_auth_interceptor(self._token)],
+                )
             
             self._machine_channels[key] = _CachedChannel(channel=channel)
             return channel
@@ -239,7 +502,15 @@ class FleetClient:
 
     async def __aenter__(self) -> "FleetClient":
         """Async context manager entry."""
+        await self._ensure_gateway_channel()
         return self
+
+    async def _ensure_gateway_channel(self) -> None:
+        """Lazily create gateway channel and stub if not already created."""
+        if self._gateway_channel is None:
+            self._gateway_channel = self._create_gateway_channel()
+            if self._gateway_stub is None:
+                self._gateway_stub = _AioFleetGatewayServiceStub(self._gateway_channel)
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit."""
@@ -263,6 +534,8 @@ class FleetClient:
         if self._closed:
             raise RuntimeError("Client is closed")
         
+        await self._ensure_gateway_channel()
+        
         try:
             request = DiscoverRequest(facility=facility or "")
             response = await self._gateway_stub.DiscoverMachines(request)
@@ -279,7 +552,7 @@ class FleetClient:
                 for m in response.machines
             ]
         except Exception as e:
-            log.error("DiscoverMachines failed: %s", e.details())
+            log.error("DiscoverMachines failed: %s", _error_details(e))
             raise
 
     async def route_machine(self, machine_id: str) -> tuple[str, int]:
@@ -293,16 +566,63 @@ class FleetClient:
             
         Raises:
             grpc.aio.AioRpcError: If machine not found or access denied
-        """
+     """
         if self._closed:
             raise RuntimeError("Client is closed")
+        
+        await self._ensure_gateway_channel()
         
         try:
             request = MachineId(id=machine_id)
             response: GatewayRoute = await self._gateway_stub.RouteMachine(request)
             return (response.instance_address, response.instance_port)
         except Exception as e:
-            log.error("RouteMachine failed for %s: %s", machine_id, e.details())
+            log.error("RouteMachine failed for %s: %s", machine_id, _error_details(e))
+            raise
+
+    async def register_machine(
+        self,
+        machine_id: str,
+        address: str,
+        port: int,
+        facility: str = "",
+        tags: Optional[list[str]] = None,
+        version: str = "",
+    ) -> bool:
+        """Register a sidecar machine with the gateway.
+        
+        Args:
+            machine_id: Unique machine identifier
+            address: Machine host address or hostname
+            port: Machine gRPC port
+            facility: Facility name for scoping
+            tags: Optional list of machine tags
+            version: LinuxCNC version string
+            
+        Returns:
+            True if registration succeeded
+            
+        Raises:
+            grpc.aio.AioRpcError: If registration fails (e.g., not authorized)
+       """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+        
+        await self._ensure_gateway_channel()
+        
+        try:
+            request = RegisterRequest(
+                machine_id=machine_id,
+                address=address,
+                port=port,
+                facility=facility,
+                tags=tags or [],
+                version=version,
+            )
+            response = await self._gateway_stub.RegisterMachine(request)
+            return response.success
+        except Exception as e:
+            log.error("RegisterMachine failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def broadcast_command(
@@ -324,13 +644,17 @@ class FleetClient:
             
         Returns:
             Dict mapping machine_id to (success: bool, message: str)
-        """
+      """
         if self._closed:
             raise RuntimeError("Client is closed")
         
+        await self._ensure_gateway_channel()
+        
         # Map scope string to proto enum value
         scope_map = {"ALL": 0, "FACILITY": 1, "TAG": 2}
-        scope_value = scope_map.get(scope, 0)
+        if scope not in scope_map:
+            raise ValueError(f"Unknown broadcast scope '{scope}'. Must be one of: {', '.join(scope_map)}")
+        scope_value = scope_map[scope]
         
         # Build broadcast request
         request = BroadcastRequest(
@@ -342,8 +666,10 @@ class FleetClient:
         # Set command based on type
         if command_type == "mdi":
             request.mdi.command = str(command_value)
-        elif command_type in ("execution", "mode"):
-            request.exec.state = int(command_value) if command_type == "execution" else int(command_value)
+        elif command_type == "execution":
+            request.exec.state = int(command_value)
+        elif command_type == "mode":
+            request.mode.mode = int(command_value)
         elif command_type == "program":
             request.program_path = str(command_value)
         else:
@@ -358,7 +684,7 @@ class FleetClient:
             
             return results
         except Exception as e:
-            log.error("BroadcastCommand failed: %s", e.details())
+            log.error("BroadcastCommand failed: %s", _error_details(e))
             raise
 
     async def broadcast_mdi(
@@ -503,52 +829,6 @@ class FleetClient:
         )
         return await stub[0].ListPrograms(request)
 
-    async def subscribe_status(
-        self,
-        machine_id: str,
-        facility: Optional[str] = None,
-        poll_interval: float = 0.5,
-    ) -> AsyncGenerator[tuple[str, Any], None]:
-        """Stream status updates for a single machine.
-
-        Args:
-            machine_id: Target machine ID
-            facility: Optional facility filter
-            poll_interval: Poll interval in seconds
-
-        Yields:
-            Tuples of (machine_id, MachineStatus)
-        """
-        if self._closed:
-            raise RuntimeError("Client is closed")
-
-        try:
-            async for status in self._do_subscribe_status(machine_id):
-                yield machine_id, status
-        except grpc.aio.AioRpcError as e:
-            log.warning("Status stream error for %s: %s", machine_id, e)
-
-    async def subscribe_errors(
-        self,
-        machine_id: str,
-    ) -> AsyncGenerator[Any, None]:
-        """Stream error events for a single machine.
-
-        Args:
-            machine_id: Target machine ID
-
-        Yields:
-            ErrorEvent objects
-        """
-        if self._closed:
-            raise RuntimeError("Client is closed")
-
-        try:
-            async for error in self._do_subscribe_errors(machine_id):
-                yield error
-        except grpc.aio.AioRpcError as e:
-            log.warning("Error stream error for %s: %s", machine_id, e)
-
     async def subscribe_all_status(
         self,
         facility: Optional[str] = None,
@@ -562,9 +842,11 @@ class FleetClient:
             
         Yields:
             Tuples of (machine_id, MachineStatus)
-        """
+   """
         if self._closed:
             raise RuntimeError("Client is closed")
+        
+        await self._ensure_gateway_channel()
         
         try:
             request = SubscribeAllRequest(
@@ -576,7 +858,7 @@ class FleetClient:
             async for status in call:
                 yield (status.machine_id, status)
         except Exception as e:
-            log.error("SubscribeAllStatus failed: %s", e.details())
+            log.error("SubscribeAllStatus failed: %s", _error_details(e))
             raise
 
     # -----------------------------------------------------------------------
@@ -585,8 +867,8 @@ class FleetClient:
 
     async def _get_fleet_stub(
         self, machine_id: str
-    ) -> tuple[grpc.aio.FleetServiceStub, str, int]:
-        """Route a machine and return (FleetServiceStub, address, port).
+    ) -> tuple[_AioFleetServiceStub, str, int]:
+        """Route a machine and return (_AioFleetServiceStub, address, port).
         
         Raises grpc.aio.AioRpcError if machine not found or access denied.
         """
@@ -617,7 +899,7 @@ class FleetClient:
                     backoff = _INITIAL_BACKOFF * (2 ** attempt)
                     log.debug(
                         "Read RPC %s failed (attempt %d/%d), retrying in %.3fs: %s",
-                        rpc_name, attempt + 1, _MAX_RETRIES, backoff, e.details(),
+                        rpc_name, attempt + 1, _MAX_RETRIES, backoff, _error_details(e),
                     )
                     await asyncio.sleep(backoff)
         raise last_exc
@@ -667,7 +949,7 @@ class FleetClient:
             request = SetModeRequest(id=MachineId(id=machine_id), mode=mode)
             return await stub[0].SetMode(request)
         except Exception as e:
-            log.error("SetMode failed for %s: %s", machine_id, e.details())
+            log.error("SetMode failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def set_execution(self, machine_id: str, state: int) -> Result:
@@ -688,7 +970,7 @@ class FleetClient:
             request = ExecutionCommand(id=MachineId(id=machine_id), state=state)
             return await stub[0].SetExecution(request)
         except Exception as e:
-            log.error("SetExecution failed for %s: %s", machine_id, e.details())
+            log.error("SetExecution failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def start(self, machine_id: str) -> Result:
@@ -707,7 +989,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].Start(Empty())
         except Exception as e:
-            log.error("Start failed for %s: %s", machine_id, e.details())
+            log.error("Start failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def stop(self, machine_id: str) -> Result:
@@ -726,7 +1008,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].Stop(Empty())
         except Exception as e:
-            log.error("Stop failed for %s: %s", machine_id, e.details())
+            log.error("Stop failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def feed_hold(self, machine_id: str) -> Result:
@@ -745,7 +1027,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].FeedHold(Empty())
         except Exception as e:
-            log.error("FeedHold failed for %s: %s", machine_id, e.details())
+            log.error("FeedHold failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def continue_exec(self, machine_id: str) -> Result:
@@ -764,7 +1046,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].Continue(Empty())
         except Exception as e:
-            log.error("Continue failed for %s: %s", machine_id, e.details())
+            log.error("Continue failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def home_all(self, machine_id: str) -> Result:
@@ -783,7 +1065,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].HomeAll(Empty())
         except Exception as e:
-            log.error("HomeAll failed for %s: %s", machine_id, e.details())
+            log.error("HomeAll failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def step_forward(self, machine_id: str) -> Result:
@@ -802,7 +1084,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].StepForward(Empty())
         except Exception as e:
-            log.error("StepForward failed for %s: %s", machine_id, e.details())
+            log.error("StepForward failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def send_mdi(self, machine_id: str, command: str) -> Result:
@@ -823,7 +1105,7 @@ class FleetClient:
             request = MdiCommand(id=MachineId(id=machine_id), command=command)
             return await stub[0].SendMdiCommand(request)
         except Exception as e:
-            log.error("SendMDI failed for %s: %s", machine_id, e.details())
+            log.error("SendMDI failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def home_axis(self, machine_id: str, axis: int) -> Result:
@@ -846,7 +1128,7 @@ class FleetClient:
             )
             return await stub[0].HomeAxis(request)
         except Exception as e:
-            log.error("HomeAxis(%d) failed for %s: %s", axis, machine_id, e.details())
+            log.error("HomeAxis(%d) failed for %s: %s", axis, machine_id, _error_details(e))
             raise
 
     async def load_program(self, machine_id: str, path: str) -> Result:
@@ -867,7 +1149,7 @@ class FleetClient:
             request = ProgramPath(id=MachineId(id=machine_id), path=path)
             return await stub[0].LoadProgram(request)
         except Exception as e:
-            log.error("LoadProgram(%s) failed for %s: %s", path, machine_id, e.details())
+            log.error("LoadProgram(%s) failed for %s: %s", path, machine_id, _error_details(e))
             raise
 
     async def get_position(
@@ -893,7 +1175,7 @@ class FleetClient:
                 lambda: self._do_get_position(machine_id, position_type),
             )
         except Exception as e:
-            log.error("GetPosition failed for %s: %s", machine_id, e.details())
+            log.error("GetPosition failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def _do_get_position(self, machine_id: str, position_type: int):
@@ -919,7 +1201,7 @@ class FleetClient:
                 lambda: self._do_list_hal(machine_id),
             )
         except Exception as e:
-            log.error("ListHalComponents failed for %s: %s", machine_id, e.details())
+            log.error("ListHalComponents failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def _do_list_hal(self, machine_id: str):
@@ -946,7 +1228,7 @@ class FleetClient:
                 lambda: self._do_read_hal_pin(machine_id, pin_name),
             )
         except Exception as e:
-            log.error("ReadHalPin '%s' failed for %s: %s", pin_name, machine_id, e.details())
+            log.error("ReadHalPin '%s' failed for %s: %s", pin_name, machine_id, _error_details(e))
             raise
 
     async def _do_read_hal_pin(self, machine_id: str, pin_name: str):
@@ -982,16 +1264,16 @@ class FleetClient:
         try:
             stub = await self._get_fleet_stub(machine_id)
             request = HalPinWrite(
-                id=MachineId(id=machine_id),
-                pin_name=pin_name,
-                value_f=float_value or 0.0,
-                value_u32=u32_value or 0,
-                value_s32=s32_value or 0,
-                value_bit=bit_value or False,
-            )
+                 id=MachineId(id=machine_id),
+                 pin_name=pin_name,
+                 value_f=float_value if float_value is not None else 0.0,
+                 value_u32=u32_value if u32_value is not None else 0,
+                 value_s32=s32_value if s32_value is not None else 0,
+                 value_bit=bit_value if bit_value is not None else False,
+             )
             return await stub[0].WriteHalPin(request)
         except Exception as e:
-            log.error("WriteHalPin '%s' failed for %s: %s", pin_name, machine_id, e.details())
+            log.error("WriteHalPin '%s' failed for %s: %s", pin_name, machine_id, _error_details(e))
             raise
 
     async def get_errors(
@@ -1017,7 +1299,7 @@ class FleetClient:
                 lambda: self._do_get_errors(machine_id, limit),
             )
         except Exception as e:
-            log.error("GetErrors failed for %s: %s", machine_id, e.details())
+            log.error("GetErrors failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def _do_get_errors(self, machine_id: str, limit: int):
@@ -1043,7 +1325,7 @@ class FleetClient:
                 lambda: self._do_get_machine_info(machine_id),
             )
         except Exception as e:
-            log.error("GetMachineInfo failed for %s: %s", machine_id, e.details())
+            log.error("GetMachineInfo failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def _do_get_machine_info(self, machine_id: str):
@@ -1077,13 +1359,40 @@ class FleetClient:
             )
         except Exception as e:
             log.error("GetIniParam [%s]%s failed for %s: %s",
-                      section, option, machine_id, e.details())
+                      section, option, machine_id, _error_details(e))
             raise
 
     async def _do_get_ini_param(self, machine_id: str, section: str, option: str):
         stub = await self._get_fleet_stub(machine_id)
         request = IniParamRequest(id=MachineId(id=machine_id), section=section, option=option)
         return await stub[0].GetIniParam(request)
+
+    async def set_machine_state(self, machine_id: str, state: int) -> Result:
+        """Set machine control state (e-stop reset, power on/off).
+        
+        Admin-only operation. Requires admin role.
+        
+        Args:
+            machine_id: Target machine identifier
+            state: MachineControlState value
+                STATE_ESTOP=0, STATE_ESTOP_RESET=1, STATE_OFF=2, STATE_ON=3
+            
+        Returns:
+            Result with success status and error code if applicable
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+
+        try:
+            stub = await self._get_fleet_stub(machine_id)
+            request = MachineStateCommand(
+                id=MachineId(id=machine_id),
+                state=state,
+            )
+            return await stub[0].SetMachineState(request)
+        except Exception as e:
+            log.error("SetMachineState failed for %s: %s", machine_id, _error_details(e))
+            raise
 
     # -----------------------------------------------------------------------
     # FleetService — streaming subscriptions
@@ -1111,7 +1420,7 @@ class FleetClient:
             async for status in call:
                 yield status
         except Exception as e:
-            log.error("SubscribeStatus failed for %s: %s", machine_id, e.details())
+            log.error("SubscribeStatus failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def subscribe_hal_pins(
@@ -1144,7 +1453,7 @@ class FleetClient:
             async for update in call:
                 yield update
         except Exception as e:
-            log.error("SubscribeHalPins failed for %s: %s", machine_id, e.details())
+            log.error("SubscribeHalPins failed for %s: %s", machine_id, _error_details(e))
             raise
 
     async def subscribe_errors(
@@ -1169,5 +1478,5 @@ class FleetClient:
             async for error in call:
                 yield error
         except Exception as e:
-            log.error("SubscribeErrors failed for %s: %s", machine_id, e.details())
+            log.error("SubscribeErrors failed for %s: %s", machine_id, _error_details(e))
             raise

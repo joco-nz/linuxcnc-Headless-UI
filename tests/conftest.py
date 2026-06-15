@@ -26,13 +26,20 @@ def _make_mock_linuxcnc():
     mod.EXEC_STOP = 0
     mod.EXEC_START = 1
 
-    # Interp state constants
-    mod.INTERP_IDLE = 0
-    mod.INTERP_READ = 1
-    mod.INTERP_EXEC = 3
+    # Interp state constants (LinuxCNC 2.9 actual values)
+    mod.INTERP_IDLE = 1
+    mod.INTERP_READING = 2
+    mod.INTERP_PAUSED = 3
+    mod.INTERP_WAITING = 4
 
     # Estop constants
     mod.ESTOP_ACK = 2
+
+    # Machine control state constants
+    mod.STATE_ESTOP = 0
+    mod.STATE_ESTOP_RESET = 1
+    mod.STATE_OFF = 2
+    mod.STATE_ON = 3
 
     # Mode constants
     mod.MODE_MANUAL = 1
@@ -42,75 +49,78 @@ def _make_mock_linuxcnc():
     class MockStat:
         def __init__(self):
             self.state = mod.RCS_IDLE
-            self.execution = mod.EXEC_STATE_IDLE
-            self.interp_state = mod.INTERP_IDLE
-            self.estop_state = 0  # NOT_E_STOPPED (ESTOP_ACK=2 would block mode changes)
-            self.mode = mod.MODE_MANUAL
-            self.x = 0.0
-            self.y = 0.0
-            self.z = 0.0
-            self.a = 0.0
-            self.b = 0.0
-            self.c = 0.0
-            self.interp_line = 0
-            self.program_file = ""
+            self.exec_state = mod.EXEC_STATE_IDLE
+            self.interp_state = mod.INTERP_IDLE  # LinuxCNC 2.9 value = 1
+            self.estop = 0  # NOT_E_STOPPED (ESTOP_ACK=2 would block mode changes)
+            self.task_mode = mod.MODE_MANUAL
+            self.motion_line = 0
+            self.file = ""
+            self.feedrate = 100.0
+            self.joints = 3
             self.spindle_at_speed = False
-            self.coolant_mist = False
-            self.coolant_flood = False
-            self.coolant_mazak = False
+            self.mist = False
+            self.flood = False
             self.motion_type = 0
-            self.linear_axis = {"feedrate": 100.0, "feed_percent": 1.0}
-            self.spindle = {"speed_percent": 1.0}
-            # joint_actual_pos and joint_commanded_pos: list of [joint_num, pos] pairs
-            self.joint_actual_pos = [[0, 0.0], [1, 0.0], [2, 0.0]]
-            self.joint_commanded_pos = [[0, 0.0], [1, 0.0], [2, 0.0]]
-            self.joint_config = [3]
+            # Flat tuples indexed by axis (real LinuxCNC 2.9 API)
+            self.joint_actual_position = tuple([0.0] * 16)
+            self.joint_position = tuple([0.0] * 16)
+            # World position tuples (x, y, z, a, b, c, u, v, w)
+            self.position = (0.0,) * 9
+            self.actual_position = (0.0,) * 9
+            # Spindle is a tuple of dicts in real LinuxCNC 2.9
+            self.spindle = ({'speed': 0.0, 'override': 1.0},)
 
         def poll(self):
             pass
 
     class MockCommand:
+        _instances = []
+
         def __init__(self):
-            pass
+            self._state = 0  # Current machine state (STATE_ESTOP=0 by default)
+            self._calls = []
+            MockCommand._instances.append(self)
 
         def mode(self, m):
-            pass
+            self._calls.append(("mode", m))
 
         def execute(self, e):
-            pass
+            self._calls.append(("execute", e))
 
         def feed_hold(self):
-            pass
+            self._calls.append(("feed_hold",))
 
         def continue_(self):
-            pass
+            self._calls.append(("continue_",))
 
         def home(self, axis):
-            pass
+            self._calls.append(("home", axis))
 
         def mdi(self, cmd):
-            pass
+            self._calls.append(("mdi", cmd))
 
         def program_open(self, path):
-            pass
+            self._calls.append(("program_open", path))
 
         def fast_mode(self, on):
-            pass
+            self._calls.append(("fast_mode", on))
 
         def retract(self, on):
-            pass
+            self._calls.append(("retract", on))
+
+        def state(self, s):
+            """Set machine control state (STATE_ESTOP, STATE_ESTOP_RESET, STATE_OFF, STATE_ON)."""
+            self._state = s
+            self._calls.append(("state", s))
 
     class MockErrorChannel:
         def __init__(self):
-            self._queue = []
+            self._errors = []
 
         def poll(self):
-            pass
-
-        def get(self):
-            if not self._queue:
-                raise IndexError("empty")
-            return self._queue.pop(0)
+            if self._errors:
+                return self._errors.pop(0)
+            return None
 
     class MockIni:
         _find_path = "/fake.ini"
@@ -197,6 +207,11 @@ def pytest_runtest_setup(item):
             mod = sys.modules[mod_name]
             if hasattr(mod, "reset_mock"):
                 mod.reset_mock()
+            # Reset MockCommand instances state
+            if hasattr(mod, "command") and hasattr(mod.command, "_instances"):
+                for instance in mod.command._instances:
+                    instance._state = 0
+                    instance._calls = []
 
 
 def pytest_unconfigure(config):

@@ -73,11 +73,14 @@ class TestMapInterpState:
     def test_idle(self, linuxcnc_module):
         assert _map_interp_state(linuxcnc_module.INTERP_IDLE) == InterpState.INTERP_IDLE
 
-    def test_read(self, linuxcnc_module):
-        assert _map_interp_state(linuxcnc_module.INTERP_READ) == InterpState.READ
+    def test_reading(self, linuxcnc_module):
+        assert _map_interp_state(linuxcnc_module.INTERP_READING) == InterpState.READ
 
-    def test_exec(self, linuxcnc_module):
-        assert _map_interp_state(linuxcnc_module.INTERP_EXEC) == InterpState.EXECUTE
+    def test_paused(self, linuxcnc_module):
+        assert _map_interp_state(linuxcnc_module.INTERP_PAUSED) == InterpState.EXECUTE
+
+    def test_waiting(self, linuxcnc_module):
+        assert _map_interp_state(linuxcnc_module.INTERP_WAITING) == InterpState.PREDICT
 
     def test_unknown_maps_to_idle(self):
         assert _map_interp_state(99) == InterpState.INTERP_IDLE

@@ -41,6 +41,7 @@ class MachineRegistry:
         self._lock = threading.Lock()
         self._running = False
         self._cleanup_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
 
     def start(self) -> None:
         """Start the background cleanup thread."""
@@ -55,6 +56,7 @@ class MachineRegistry:
     def stop(self) -> None:
         """Stop the background cleanup thread."""
         self._running = False
+        self._stop_event.set()
         if self._cleanup_thread is not None:
             self._cleanup_thread.join(timeout=5.0)
             self._cleanup_thread = None
@@ -183,7 +185,9 @@ class MachineRegistry:
     def _cleanup_loop(self) -> None:
         """Background loop that periodically removes expired entries."""
         while self._running:
-            time.sleep(self._cleanup_interval)
+            self._stop_event.wait(timeout=self._cleanup_interval)
+            if not self._running:
+                break
             now = time.time()
             with self._lock:
                 expired_ids = [

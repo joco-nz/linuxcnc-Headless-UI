@@ -1,5 +1,7 @@
 """Tests for FleetServiceRPC — auth checks, error paths, and handler delegation."""
 
+from unittest.mock import MagicMock, Mock, patch
+
 import grpc
 import pytest
 
@@ -118,6 +120,10 @@ class MockSidecar:
 
     def step_forward(self):
         self._track("step_forward")
+        return Result(success=True, message="ok")
+
+    def set_machine_state(self, state):
+        self._track("set_machine_state", state)
         return Result(success=True, message="ok")
 
     # HAL write handlers
@@ -741,3 +747,224 @@ class TestRpcHandlerDelegation:
         request = PositionRequest(id=MachineId(id="test"), type=PositionRequest.WORLD)
         result = rpc.GetPosition(request, ctx)
         assert isinstance(result, PositionResponse)
+
+
+# ── SetMachineState (admin-only) ────────────────────────────────────────
+
+class TestSetMachineState:
+
+    def test_set_machine_state_denied_maintainer(self):
+        from linuxcnc_fleet.fleet_pb2 import MachineControlState
+        rpc = _make_rpc()
+        ctx = MockServicerContext()
+        auth_ctx = _MockAuthContext("maintainer")
+        request = _AuthRequest(
+            type(rpc.sidecar).__dict__.get("__annotations__", {}),  # dummy
+        )
+        # Use a simple proto message with state field
+        from linuxcnc_fleet.fleet_pb2 import MachineStateCommand
+        msg = MachineStateCommand(id=MachineId(id="test"), state=MachineControlState.STATE_ON)
+        request = _AuthRequest(msg, auth_ctx)
+        result = rpc.SetMachineState(request, ctx)
+        assert result.success is False
+        assert result.message == "Access denied"
+
+    def test_set_machine_state_denied_operator(self):
+        from linuxcnc_fleet.fleet_pb2 import MachineControlState, MachineStateCommand
+        rpc = _make_rpc()
+        ctx = MockServicerContext()
+        auth_ctx = _MockAuthContext("operator")
+        msg = MachineStateCommand(id=MachineId(id="test"), state=MachineControlState.STATE_ESTOP_RESET)
+        request = _AuthRequest(msg, auth_ctx)
+        result = rpc.SetMachineState(request, ctx)
+        assert result.success is False
+        assert result.message == "Access denied"
+
+    def test_set_machine_state_denied_viewer(self):
+        from linuxcnc_fleet.fleet_pb2 import MachineControlState, MachineStateCommand
+        rpc = _make_rpc()
+        ctx = MockServicerContext()
+        auth_ctx = _MockAuthContext("viewer")
+        msg = MachineStateCommand(id=MachineId(id="test"), state=MachineControlState.STATE_OFF)
+        request = _AuthRequest(msg, auth_ctx)
+        result = rpc.SetMachineState(request, ctx)
+        assert result.success is False
+        assert result.message == "Access denied"
+
+    def test_set_machine_state_allowed_admin(self):
+        from linuxcnc_fleet.fleet_pb2 import MachineControlState, MachineStateCommand
+        rpc = _make_rpc()
+        ctx = MockServicerContext()
+        auth_ctx = _MockAuthContext("admin")
+        msg = MachineStateCommand(id=MachineId(id="test"), state=MachineControlState.STATE_ON)
+        request = _AuthRequest(msg, auth_ctx)
+        result = rpc.SetMachineState(request, ctx)
+        assert result.success is True
+
+    def test_set_machine_state_delegates_correctly(self):
+        from linuxcnc_fleet.fleet_pb2 import MachineControlState, MachineStateCommand
+        rpc = _make_rpc()
+        ctx = MockServicerContext()
+        auth_ctx = _MockAuthContext("admin")
+        msg = MachineStateCommand(id=MachineId(id="test"), state=MachineControlState.STATE_ESTOP_RESET)
+        request = _AuthRequest(msg, auth_ctx)
+        result = rpc.SetMachineState(request, ctx)
+        assert result.success is True
+        assert ("set_machine_state", (1,)) in rpc.sidecar._calls
+
+
+# ── M7: TLS/mTLS file I/O error handling ────────────────────────────────
+
+class TestBuildCredentials:
+    """Tests for _build_credentials error handling (M7)."""
+
+    def test_missing_cert_file_raises_file_not_found(self, tmp_path):
+        from linuxcnc_fleet.server import _build_credentials
+
+        key_path = str(tmp_path / "key.pem")
+        with open(key_path, "w") as f:
+            f.write("fake-key")
+
+        with pytest.raises(FileNotFoundError, match="TLS certificate file not found"):
+            _build_credentials(
+                cert_file=str(tmp_path / "nonexistent.pem"),
+                key_file=key_path,
+            )
+
+    def test_missing_key_file_raises_file_not_found(self, tmp_path):
+        from linuxcnc_fleet.server import _build_credentials
+
+        cert_path = str(tmp_path / "cert.pem")
+        with open(cert_path, "w") as f:
+            f.write("fake-cert")
+
+        with pytest.raises(FileNotFoundError, match="TLS key file not found"):
+            _build_credentials(
+                cert_file=cert_path,
+                key_file=str(tmp_path / "nonexistent.pem"),
+            )
+
+    def test_missing_root_cert_file_raises_file_not_found(self, tmp_path):
+        from linuxcnc_fleet.server import _build_credentials
+
+        cert_path = str(tmp_path / "cert.pem")
+        with open(cert_path, "w") as f:
+            f.write("fake-cert")
+        key_path = str(tmp_path / "key.pem")
+        with open(key_path, "w") as f:
+            f.write("fake-key")
+
+        with pytest.raises(FileNotFoundError, match="TLS root certificate file not found"):
+            _build_credentials(
+                cert_file=cert_path,
+                key_file=key_path,
+                root_cert_file=str(tmp_path / "nonexistent-root.pem"),
+            )
+
+    def test_permission_denied_cert_file(self, tmp_path):
+        from linuxcnc_fleet.server import _build_credentials
+
+        cert_path = str(tmp_path / "cert.pem")
+        key_path = str(tmp_path / "key.pem")
+        with open(cert_path, "w") as f:
+            f.write("fake-cert")
+        with open(key_path, "w") as f:
+            f.write("fake-key")
+
+        import os
+        os.chmod(cert_path, 0o000)
+        try:
+            with pytest.raises(PermissionError, match="Permission denied reading TLS certificate"):
+                _build_credentials(
+                    cert_file=cert_path,
+                    key_file=key_path,
+                )
+        finally:
+            os.chmod(cert_path, 0o644)
+
+    def test_permission_denied_key_file(self, tmp_path):
+        from linuxcnc_fleet.server import _build_credentials
+
+        cert_path = str(tmp_path / "cert.pem")
+        key_path = str(tmp_path / "key.pem")
+        with open(cert_path, "w") as f:
+            f.write("fake-cert")
+        with open(key_path, "w") as f:
+            f.write("fake-key")
+
+        import os
+        os.chmod(key_path, 0o000)
+        try:
+            with pytest.raises(PermissionError, match="Permission denied reading TLS key"):
+                _build_credentials(
+                    cert_file=cert_path,
+                    key_file=key_path,
+                )
+        finally:
+            os.chmod(key_path, 0o644)
+
+
+# ── M8: Configurable thread pool max_workers ────────────────────────────
+
+class TestCreateServerMaxWorkers:
+    """Tests for create_server max_workers parameter (M8)."""
+
+    def _make_mock_sidecar(self):
+        return MagicMock()
+
+    def test_create_server_default_max_workers(self):
+        from linuxcnc_fleet.server import create_server
+
+        mock_sidecar = self._make_mock_sidecar()
+        with patch("grpc.server") as mock_grpc_server:
+            create_server(mock_sidecar, port=50051)
+            mock_grpc_server.assert_called_once()
+            args, kwargs = mock_grpc_server.call_args
+            executor = args[0]
+            assert executor._max_workers == 8
+
+    def test_create_server_custom_max_workers(self):
+        from linuxcnc_fleet.server import create_server
+
+        mock_sidecar = self._make_mock_sidecar()
+        with patch("grpc.server") as mock_grpc_server:
+            create_server(mock_sidecar, port=50051, max_workers=16)
+            mock_grpc_server.assert_called_once()
+            args, kwargs = mock_grpc_server.call_args
+            executor = args[0]
+            assert executor._max_workers == 16
+
+    def test_create_server_env_var_max_workers(self):
+        from linuxcnc_fleet.server import create_server
+
+        mock_sidecar = self._make_mock_sidecar()
+        with patch("grpc.server") as mock_grpc_server:
+            create_server(mock_sidecar, port=50051)
+            mock_grpc_server.assert_called_once()
+            args, kwargs = mock_grpc_server.call_args
+            executor = args[0]
+            assert executor._max_workers == 8
+
+    def test_run_server_passes_max_workers(self):
+        from linuxcnc_fleet.server import run_server
+
+        mock_sidecar = self._make_mock_sidecar()
+        with patch("linuxcnc_fleet.server.create_server") as mock_create:
+            mock_server = Mock()
+            mock_create.return_value = mock_server
+            run_server(mock_sidecar, port=50051, max_workers=24)
+            mock_create.assert_called_once()
+            args, kwargs = mock_create.call_args
+            assert kwargs["max_workers"] == 24
+
+    def test_run_server_default_max_workers(self):
+        from linuxcnc_fleet.server import run_server
+
+        mock_sidecar = self._make_mock_sidecar()
+        with patch("linuxcnc_fleet.server.create_server") as mock_create:
+            mock_server = Mock()
+            mock_create.return_value = mock_server
+            run_server(mock_sidecar, port=50051)
+            mock_create.assert_called_once()
+            args, kwargs = mock_create.call_args
+            assert kwargs["max_workers"] == 8

@@ -1,6 +1,9 @@
 """Tests for OIDC token validation and user extraction."""
 
+import json
+import logging
 import time
+from unittest.mock import MagicMock, patch
 
 import jwt
 import pytest
@@ -438,6 +441,70 @@ class TestJWKSErrorPaths:
         with pytest.raises(urllib.error.URLError):
             auth._fetch_jwks()
 
+    def test_jwks_fetch_https_creates_ssl_context(self):
+        """JWKS fetch over HTTPS creates and uses an SSL context for certificate verification (H7)."""
+        import ssl
+
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            jwks_url="https://example.com/.well-known/jwks.json",
+            algorithms=["RS256"],
+        )
+        auth._jwks_cache = None
+        auth._jwks_expires_at = 0.0
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_response = MagicMock()
+            mock_response.read.return_value = json.dumps({"keys": []}).encode()
+            mock_context_manager = MagicMock()
+            mock_context_manager.__enter__ = MagicMock(return_value=mock_response)
+            mock_context_manager.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_context_manager
+
+            auth._fetch_jwks()
+
+        call_args = mock_urlopen.call_args
+        assert call_args is not None, "urlopen was not called"
+        context_arg = call_args.kwargs.get("context", None) if hasattr(call_args, "kwargs") else None
+        if context_arg is None and call_args.args:
+            context_arg = call_args.args[1] if len(call_args.args) > 1 else None
+        assert isinstance(context_arg, ssl.SSLContext), \
+            f"Expected ssl.SSLContext for HTTPS JWKS URL, got {type(context_arg)}"
+
+    def test_jwks_fetch_http_logs_warning(self, caplog):
+        """JWKS fetch over HTTP logs a MitM warning and passes no SSL context (H7)."""
+        auth = AuthManager(
+            issuer="https://test.example.com",
+            audience="fleet",
+            jwks_url="http://example.com/.well-known/jwks.json",
+            algorithms=["RS256"],
+        )
+        auth._jwks_cache = None
+        auth._jwks_expires_at = 0.0
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_response = MagicMock()
+            mock_response.read.return_value = json.dumps({"keys": []}).encode()
+            mock_context_manager = MagicMock()
+            mock_context_manager.__enter__ = MagicMock(return_value=mock_response)
+            mock_context_manager.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_context_manager
+
+            with caplog.at_level(logging.WARNING, logger="gateway.auth"):
+                auth._fetch_jwks()
+
+        assert "MitM" in caplog.text or "HTTP" in caplog.text or "vulnerable" in caplog.text, \
+            f"Expected MitM warning in logs, got: {caplog.text}"
+
+        call_args = mock_urlopen.call_args
+        assert call_args is not None, "urlopen was not called"
+        context_arg = call_args.kwargs.get("context", None) if hasattr(call_args, "kwargs") else None
+        if context_arg is None and call_args.args:
+            context_arg = call_args.args[1] if len(call_args.args) > 1 else None
+        assert context_arg is None, \
+            f"Expected no SSL context for HTTP JWKS URL, got {type(context_arg)}"
+
     def test_jwks_cache_hit(self):
         """Second JWKS fetch returns cached data without network call."""
         private_key, public_pem = self._generate_rsa_keys()
@@ -505,3 +572,271 @@ class TestJWKSErrorPaths:
         token = jwt.encode(payload, private_key, algorithm="RS256")
         with pytest.raises(TokenValidationError, match="No signing key found"):
             auth.validate_token(token)
+
+
+class TestSymmetricKeyRotation:
+    """Tests for HS256 multi-key support and rotation (H3)."""
+
+    def test_multi_key_accepts_old_key(self):
+        """Token signed with the old key is accepted when both keys are configured."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        new_key = "new-secret-key-for-testing-32bytes!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"old": old_key, "new": new_key},
+            algorithms=["HS256"],
+        )
+
+        token = create_test_token(
+            {"sub": "user-1", "name": "OldKeyUser"},
+            secret_key=old_key,
+        )
+        user = auth.validate_token(token)
+        assert user.sub == "user-1"
+
+    def test_multi_key_accepts_new_key(self):
+        """Token signed with the new key is accepted when both keys are configured."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        new_key = "new-secret-key-for-testing-32bytes!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"old": old_key, "new": new_key},
+            algorithms=["HS256"],
+        )
+
+        token = create_test_token(
+            {"sub": "user-2", "name": "NewKeyUser"},
+            secret_key=new_key,
+        )
+        user = auth.validate_token(token)
+        assert user.sub == "user-2"
+
+    def test_multi_key_rejects_wrong_key(self):
+        """Token signed with an unknown key is rejected even with multiple keys."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        new_key = "new-secret-key-for-testing-32bytes!!!"
+        wrong_key = "wrong-secret-key-for-testing-32bytes!!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"old": old_key, "new": new_key},
+            algorithms=["HS256"],
+        )
+
+        token = create_test_token(
+            {"sub": "user-3"},
+            secret_key=wrong_key,
+        )
+        with pytest.raises(TokenValidationError):
+            auth.validate_token(token)
+
+    def test_multi_key_with_kid_selects_correct_key(self):
+        """Token with kid header selects the correct key from secret_keys."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        new_key = "new-secret-key-for-testing-32bytes!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"old": old_key, "new": new_key},
+            algorithms=["HS256"],
+        )
+
+        token = create_test_token(
+            {"sub": "user-4"},
+            secret_key=new_key,
+            kid="new",
+        )
+        user = auth.validate_token(token)
+        assert user.sub == "user-4"
+
+    def test_add_symmetric_key_rotation(self):
+        """Dynamically adding a key during rotation works."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        new_key = "new-secret-key-for-rotation-test-32bytes!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"old": old_key},
+            algorithms=["HS256"],
+        )
+
+        # Old key works before adding new one
+        token_old = create_test_token({"sub": "user-5"}, secret_key=old_key)
+        user = auth.validate_token(token_old)
+        assert user.sub == "user-5"
+
+        # Add new key mid-rotation
+        auth.add_symmetric_key("new", new_key)
+
+        # Both keys should work now
+        token_new = create_test_token({"sub": "user-6"}, secret_key=new_key)
+        user = auth.validate_token(token_new)
+        assert user.sub == "user-6"
+
+        token_old2 = create_test_token({"sub": "user-7"}, secret_key=old_key)
+        user = auth.validate_token(token_old2)
+        assert user.sub == "user-7"
+
+    def test_remove_symmetric_key(self):
+        """Removing a key revokes tokens signed with it."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        new_key = "new-secret-key-for-testing-32bytes!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"old": old_key, "new": new_key},
+            algorithms=["HS256"],
+        )
+
+        # Both keys work
+        token_old = create_test_token({"sub": "user-8"}, secret_key=old_key)
+        user = auth.validate_token(token_old)
+        assert user.sub == "user-8"
+
+        # Remove old key
+        auth.remove_symmetric_key("old")
+
+        # Old key should no longer work (no fallback to secret_key)
+        with pytest.raises(TokenValidationError):
+            auth.validate_token(token_old)
+
+        # New key still works
+        token_new = create_test_token({"sub": "user-9"}, secret_key=new_key)
+        user = auth.validate_token(token_new)
+        assert user.sub == "user-9"
+
+    def test_secret_keys_only_no_legacy_key(self):
+        """When only secret_keys is set (no legacy secret_key), keys still work."""
+        key1 = "rotation-key-one-for-testing-32bytes!!!"
+        key2 = "rotation-key-two-for-testing-32bytes!!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"k1": key1, "k2": key2},
+            algorithms=["HS256"],
+        )
+
+        token1 = create_test_token({"sub": "user-10"}, secret_key=key1)
+        user = auth.validate_token(token1)
+        assert user.sub == "user-10"
+
+        token2 = create_test_token({"sub": "user-11"}, secret_key=key2)
+        user = auth.validate_token(token2)
+        assert user.sub == "user-11"
+
+    def test_secret_keys_only_rejects_unknown(self):
+        """No legacy fallback when only secret_keys is configured."""
+        key1 = "rotation-key-one-for-testing-32bytes!!!"
+        wrong_key = "wrong-key-for-testing-32bytes-minimum-length!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"k1": key1},
+            algorithms=["HS256"],
+        )
+
+        token = create_test_token({"sub": "user-12"}, secret_key=wrong_key)
+        with pytest.raises(TokenValidationError):
+            auth.validate_token(token)
+
+    def test_create_test_auth_manager_with_secret_keys(self):
+        """create_test_auth_manager accepts secret_keys parameter."""
+        auth = create_test_auth_manager(
+            secret_keys={"old": "test-old-key-32bytes-minimum!!!", "new": "test-new-key-32bytes-minimum!!!"},
+        )
+        assert "old" in auth._symmetric_keys
+        assert "new" in auth._symmetric_keys
+
+    def test_create_test_token_with_kid(self):
+        """create_test_token accepts kid parameter for header."""
+        token = create_test_token({"sub": "user-13"}, kid="my-key")
+        header = jwt.get_unverified_header(token)
+        assert header["kid"] == "my-key"
+
+    def test_legacy_secret_key_fallback_in_multi_key(self):
+        """Legacy secret_key is tried as last resort when all keys fail."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        new_key = "new-secret-key-for-testing-32bytes!!!"
+        legacy_key = "legacy-secret-key-for-testing-32bytes!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_key=legacy_key,
+            secret_keys={"new": new_key},
+            algorithms=["HS256"],
+        )
+
+        # Token signed with legacy key is accepted via fallback
+        token = create_test_token({"sub": "user-14"}, secret_key=legacy_key)
+        user = auth.validate_token(token)
+        assert user.sub == "user-14"
+
+    def test_expired_token_not_fallen_back(self):
+        """Expired tokens raise immediately without trying fallback key."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        legacy_key = "legacy-secret-key-for-testing-32bytes!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_key=legacy_key,
+            secret_keys={"old": old_key},
+            algorithms=["HS256"],
+        )
+
+        past_exp = int(time.time()) - 3600
+        payload = {
+            "exp": past_exp,
+            "iss": "https://test.auth.example.com",
+            "aud": "linuxcnc-fleet",
+            "sub": "expired-user",
+        }
+        token = jwt.encode(payload, old_key, algorithm="HS256")
+        with pytest.raises(TokenValidationError, match="expired"):
+            auth.validate_token(token)
+
+    def test_invalid_issuer_not_fallen_back(self):
+        """Invalid issuer tokens raise immediately without trying fallback key."""
+        old_key = "old-secret-key-for-testing-32bytes!!!!"
+        legacy_key = "legacy-secret-key-for-testing-32bytes!!!"
+
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_key=legacy_key,
+            secret_keys={"old": old_key},
+            algorithms=["HS256"],
+        )
+
+        payload = {
+            "exp": int(time.time()) + 3600,
+            "iss": "https://evil.example.com",
+            "aud": "linuxcnc-fleet",
+            "sub": "evil-user",
+        }
+        token = jwt.encode(payload, old_key, algorithm="HS256")
+        with pytest.raises(TokenValidationError, match="Invalid issuer"):
+            auth.validate_token(token)
+
+    def test_remove_nonexistent_key_is_noop(self):
+        """Removing a non-existent kid is a no-op."""
+        auth = AuthManager(
+            issuer="https://test.auth.example.com",
+            audience="linuxcnc-fleet",
+            secret_keys={"k1": "key-one-32bytes-minimum-length!!!"},
+            algorithms=["HS256"],
+        )
+        # Should not raise
+        auth.remove_symmetric_key("nonexistent")
+        assert "k1" in auth._symmetric_keys

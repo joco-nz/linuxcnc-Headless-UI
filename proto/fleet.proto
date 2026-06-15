@@ -13,7 +13,6 @@ enum MachineState {
   HOLD = 5;
   E_STOP = 6;
   JOG = 7;
-  MANUAL = 8;
   AUTO_DONE = 9;
 }
 
@@ -80,6 +79,14 @@ enum ErrorCode {
   HAL_WRITE_PROTECTED = 7;
   TIMEOUT = 8;
   INTERNAL_ERROR = 9;
+}
+
+// Machine control state — linuxcnc.command.state() constants
+enum MachineControlState {
+  STATE_ESTOP = 0;        // Enter E-stop (internal to LinuxCNC)
+  STATE_ESTOP_RESET = 1;  // Clear E-stop
+  STATE_OFF = 2;          // Power off (disable machine enable)
+  STATE_ON = 3;           // Power on (enable machine)
 }
 
 // Messages — Status
@@ -334,9 +341,29 @@ message BroadcastResult {
   map<string, Result> results = 1;
 }
 
+message RegisterRequest {
+  string machine_id = 1;
+  string address = 2;
+  int32 port = 3;
+  string facility = 4;
+  repeated string tags = 5;
+  string version = 6;
+  string git_hash = 7;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string message = 2;
+}
+
 message HomeAxisRequest {
   MachineId id = 1;
   TrajAxis axis = 2;
+}
+
+message MachineStateCommand {
+  MachineId id = 1;
+  MachineControlState state = 2;
 }
 
 // Services
@@ -344,9 +371,10 @@ message HomeAxisRequest {
 service FleetService {
   rpc GetStatus(MachineId) returns (MachineStatus);
   rpc SubscribeStatus(MachineId) returns (stream MachineStatus);
-  rpc SetMode(SetModeRequest) returns (Result);
+ rpc SetMode(SetModeRequest) returns (Result);
   rpc SetExecution(ExecutionCommand) returns (Result);
- rpc Start(Empty) returns (Result);
+  rpc SetMachineState(MachineStateCommand) returns (Result);
+   rpc Start(Empty) returns (Result);
   rpc Stop(Empty) returns (Result);
   rpc FeedHold(Empty) returns (Result);
   rpc Continue(Empty) returns (Result);
@@ -372,4 +400,5 @@ service FleetGatewayService {
   rpc RouteMachine(MachineId) returns (GatewayRoute);
   rpc BroadcastCommand(BroadcastRequest) returns (BroadcastResult);
   rpc SubscribeAllStatus(SubscribeAllRequest) returns (stream MachineStatus);
+  rpc RegisterMachine(RegisterRequest) returns (RegisterResponse);
 }

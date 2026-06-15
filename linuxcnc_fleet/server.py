@@ -25,15 +25,20 @@ from linuxcnc_fleet.fleet_pb2 import (
     HalPinSubscribe,
     HalPinType,
     HalPinUpdate,
+    DiscoverRequest,
+    HalPinRead,
     HalPinValue,
+    HalPinWrite,
     HomeAxisRequest,
     IniParamRequest,
     IniParamValue,
     ListHalRequest,
     ListProgramsRequest,
+    MachineControlState,
     MachineId,
     MachineInfo,
     MachineList,
+    MachineStateCommand,
     MachineStatus,
     MdiCommand,
     Mode,
@@ -165,6 +170,11 @@ class FleetServiceRPC(FleetServiceServicer):
         if not self._check_control_access(request, context, "SetExecution"):
             return Result(success=False, message="Access denied")
         return self.sidecar.set_execution(request.state)
+
+    def SetMachineState(self, request: MachineStateCommand, context: grpc.ServicerContext) -> Result:
+        if not self._check_admin_access(request, context, "SetMachineState"):
+            return Result(success=False, message="Access denied")
+        return self.sidecar.set_machine_state(request.state)
 
     def Start(self, request: Empty, context: grpc.ServicerContext) -> Result:
         if not self._check_control_access(request, context, "Start"):
@@ -382,6 +392,7 @@ def create_server(
     root_cert_file: Optional[str] = None,
     use_gateway: bool = False,
     user_extractor=None,
+    max_workers: int = 8,
 ) -> grpc.Server:
     """Create and configure a gRPC server for the sidecar.
 
@@ -393,6 +404,7 @@ def create_server(
         root_cert_file: Root CA certificate for mTLS client verification.
         use_gateway: If True, also expose FleetGatewayService RPCs.
         user_extractor: Callable that extracts user from metadata dict.
+        max_workers: Number of worker threads for gRPC request handling.
 
     Returns:
         Configured grpc.Server instance (not yet started).
@@ -403,7 +415,7 @@ def create_server(
         interceptors.append(create_auth_interceptor(user_extractor))
 
     server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=8),
+        futures.ThreadPoolExecutor(max_workers=max_workers),
         interceptors=interceptors,
     )
 
@@ -428,15 +440,35 @@ def _build_credentials(
     key_file: str,
     root_cert_file: Optional[str] = None,
 ) -> grpc.ServerCredentials:
-    """Build TLS or mTLS credentials from certificate files."""
-    with open(cert_file, "rb") as f:
-        cert = f.read()
-    with open(key_file, "rb") as f:
-        private_key = f.read()
+    """Build TLS or mTLS credentials from certificate files.
+
+    Raises FileNotFoundError if any file is missing, or PermissionError
+    if the process lacks read access.
+    """
+    try:
+        with open(cert_file, "rb") as f:
+            cert = f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"TLS certificate file not found: {cert_file}") from None
+    except PermissionError:
+        raise PermissionError(f"Permission denied reading TLS certificate: {cert_file}") from None
+
+    try:
+        with open(key_file, "rb") as f:
+            private_key = f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"TLS key file not found: {key_file}") from None
+    except PermissionError:
+        raise PermissionError(f"Permission denied reading TLS key: {key_file}") from None
 
     if root_cert_file:
-        with open(root_cert_file, "rb") as f:
-            root_certs = f.read()
+        try:
+            with open(root_cert_file, "rb") as f:
+                root_certs = f.read()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"TLS root certificate file not found: {root_cert_file}") from None
+        except PermissionError:
+            raise PermissionError(f"Permission denied reading TLS root certificate: {root_cert_file}") from None
         creds = grpc.ssl_server_credentials(
             [(private_key, cert)],
             root_certificates=root_certs,
@@ -458,6 +490,7 @@ def run_server(
     root_cert_file: Optional[str] = None,
     use_gateway: bool = False,
     user_extractor=None,
+    max_workers: int = 8,
 ) -> None:
     """Create, start, and block on a gRPC server.
 
@@ -473,6 +506,7 @@ def run_server(
         root_cert_file=root_cert_file,
         use_gateway=use_gateway,
         user_extractor=user_extractor,
+        max_workers=max_workers,
     )
 
     server.start()

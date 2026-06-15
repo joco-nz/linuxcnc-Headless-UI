@@ -43,8 +43,9 @@ def make_token(secret: str, issuer: str = "linuxcnc-fleet", audience: str = "fle
         "iss": issuer,
         "aud": audience,
         "sub": "verify-script",
-        "scope": "admin",
+        "role": "admin",
         "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
     }
     return jwt.encode(payload, secret, algorithm="HS256")
 
@@ -55,6 +56,7 @@ async def run_checks(client, args) -> bool:
     from linuxcnc_fleet.fleet_pb2 import Mode
 
     results: list[tuple[str, bool, str]] = []
+    machines: list[MachineEntry] = []
 
     # ── Check 1: Discover machines ───────────────────────────────────────
     print("\n[1/5] Discovering machines via gateway ...")
