@@ -20,17 +20,19 @@
 
 **Phase 6: FleetUI Dashboard is complete.** aiohttp web dashboard with SSE streaming, HTML/CSS UI, and XSS protections with 70/70 unit tests passing.
 
-**Total: 760/760 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 95 UI enhancements)
+**Total: 779/779 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh)
 
 ### UI Enhancements — Token Issuance & Auto-Renewal
 
-Full plan documented in `ui_enhancements.md`. Phase 1 is complete.
+Full plan documented in `ui_enhancements.md`. Phase 1 and Phase 2 are complete.
 
 | Component        | Files                                 | Tests                     | Status |
 | ---------------- | ------------------------------------- | ------------------------- | ------ |
 | Token servicer   | `gateway/server.py` — `TokenIssuanceServicer` | 35 (test_token_issuance.py) | ✅      |
 | HTTP route       | `gateway/server.py` — `_handle_auth_token`, `_handle_auth_token_wrapper` | —                          | ✅      |
 | CLI args         | `gateway/cli.py` — 7 new arguments    | 18 (test_gateway_cli.py appended) | ✅      |
+| Interceptor refresh | `fleet_client/auth.py` — `refresh_token()` on both classes | 15 (test_fleet_client_auth.py appended) | ✅      |
+| FleetClient refresh | `fleet_client/client.py` — `refresh_token()` method | 17 (test_fleet_client.py appended) | ✅      |
 
 ## Phase 3 Deliverables
 

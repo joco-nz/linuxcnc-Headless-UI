@@ -41,6 +41,10 @@ class BearerAuthInterceptor(
     def __init__(self, token: str) -> None:
         self._token = token
 
+    def refresh_token(self, new_token: str) -> None:
+        """Update the bearer token used for subsequent RPC calls."""
+        self._token = new_token
+
     def intercept_unary_unary(self, continuation, client_call_details, request):
         metadata = list(client_call_details.metadata or [])
         metadata.append(("authorization", f"Bearer {self._token}"))
@@ -76,6 +80,10 @@ class AioBearerAuthInterceptor(
 
     def __init__(self, token: str) -> None:
         self._token = token
+
+    def refresh_token(self, new_token: str) -> None:
+        """Update the bearer token used for subsequent RPC calls."""
+        self._token = new_token
 
     async def intercept_unary_unary(self, continuation, client_call_details, request):
         metadata = list(client_call_details.metadata or [])

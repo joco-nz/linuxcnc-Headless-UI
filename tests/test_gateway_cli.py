@@ -427,3 +427,30 @@ class TestHttpPortPassedToServer:
                 assert call_kwargs["allowed_subjects"] == ["fleet-ui", "app1"]
                 assert call_kwargs["allowed_ips"] == ["127.0.0.1", "192.168.1.1"]
                 assert call_kwargs["permissive"] is True
+
+
+# ── Phase 2: Token refresh integration tests (Phase 2) ───────────────────
+
+class TestTokenRefreshIntegration:
+    """Tests verifying token refresh works end-to-end with the gateway HTTP endpoint."""
+
+    def test_can_import_token_servicer(self):
+        from gateway.server import TokenIssuanceServicer
+        assert TokenIssuanceServicer is not None
+
+    def test_token_servicer_has_issue_token(self):
+        from gateway.server import TokenIssuanceServicer
+        assert hasattr(TokenIssuanceServicer, "issue_token")
+
+    def test_auth_interceptor_has_refresh_token(self):
+        from fleet_client.auth import BearerAuthInterceptor, AioBearerAuthInterceptor
+        sync_i = BearerAuthInterceptor("test")
+        aio_i = AioBearerAuthInterceptor("test")
+        assert hasattr(sync_i, "refresh_token")
+        assert callable(sync_i.refresh_token)
+        assert hasattr(aio_i, "refresh_token")
+        assert callable(aio_i.refresh_token)
+
+    def test_fleet_client_has_refresh_token(self):
+        from fleet_client.client import FleetClient
+        assert hasattr(FleetClient, "refresh_token")

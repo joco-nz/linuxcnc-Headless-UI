@@ -388,8 +388,10 @@ class FleetClient:
         # Gateway channel with auth interceptor (created lazily)
         if _gateway_channel is not None:
             self._gateway_channel = _gateway_channel
+            self._gateway_interceptor = None
         else:
             self._gateway_channel = None
+            self._gateway_interceptor = None
         self._gateway_stub = _gateway_stub
         self._fleet_stub_factory = _fleet_stub_factory or (
             lambda ch: _AioFleetServiceStub(ch)
@@ -404,18 +406,18 @@ class FleetClient:
 
     def _create_gateway_channel(self) -> grpc.Channel:
         """Create the gRPC channel to the gateway server."""
-        auth_interceptor = create_aio_auth_interceptor(self._token)
+        self._gateway_interceptor = create_aio_auth_interceptor(self._token)
         if self._tls_enabled:
             creds = grpc.ssl_channel_credentials()
             return grpc.aio.secure_channel(
                 self._gateway_address,
                 creds,
-                interceptors=[auth_interceptor],
+                interceptors=[self._gateway_interceptor],
             )
         else:
             return grpc.aio.insecure_channel(
                 self._gateway_address,
-                interceptors=[auth_interceptor],
+                interceptors=[self._gateway_interceptor],
             )
 
     async def _get_or_create_machine_channel(
@@ -511,6 +513,46 @@ class FleetClient:
             self._gateway_channel = self._create_gateway_channel()
             if self._gateway_stub is None:
                 self._gateway_stub = _AioFleetGatewayServiceStub(self._gateway_channel)
+
+    async def refresh_token(self, new_token: str) -> None:
+        """Refresh the authentication token and reconnect all channels.
+        
+        Since grpcio doesn't support swapping interceptors on an open channel,
+        this closes existing channels and recreates them with the new token.
+        
+        Args:
+            new_token: New OIDC access token
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+        
+        old_token = self._token
+        self._token = new_token
+        
+        # Close gateway channel and recreate with new interceptor
+        if self._gateway_channel is not None:
+            try:
+                await self._gateway_channel.close()
+            except Exception:
+                pass
+            self._gateway_channel = None
+            self._gateway_stub = None
+        
+        # Close all cached machine channels (they'll be recreated on next use)
+        with self._cache_lock:
+            for key, cached in self._machine_channels.items():
+                try:
+                    await cached.channel.close()
+                except Exception:
+                    pass
+            self._machine_channels.clear()
+        
+        log.info(
+            "Token refreshed: %s -> %s... (closed %d channels)",
+            old_token[:16] if len(old_token) > 16 else old_token,
+            new_token[:16] if len(new_token) > 16 else new_token,
+            len(self._machine_channels),
+        )
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit."""

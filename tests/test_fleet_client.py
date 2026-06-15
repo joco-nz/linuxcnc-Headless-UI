@@ -1,6 +1,7 @@
 """Tests for FleetClient — routing, channel caching, retry, streaming."""
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import grpc
@@ -1013,3 +1014,318 @@ class TestContextManager:
                 asyncio.run(client.close())
             except Exception:
                 pass
+
+
+# ── Phase 2: Token refresh tests ─────────────────────────────────────────
+
+class TestTokenRefresh:
+    """Tests for FleetClient.refresh_token() — Phase 2."""
+
+    def test_refresh_updates_token(self):
+        """refresh_token() updates self._token to the new value."""
+        with patch("fleet_client.client.grpc"):
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token-abc123",
+                tls_enabled=False,
+            )
+            try:
+                assert client._token == "old-token-abc123"
+                asyncio.run(client.refresh_token("new-token-def456"))
+                assert client._token == "new-token-def456"
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_closes_gateway_channel(self):
+        """refresh_token() closes the gateway channel and sets it to None."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=False,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                assert client._gateway_channel is not None
+
+                asyncio.run(client.refresh_token("new-token"))
+                mock_channel.close.assert_called_once()
+                assert client._gateway_channel is None
+                assert client._gateway_stub is None
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_closes_all_machine_channels(self):
+        """refresh_token() closes all cached machine channels."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=False,
+            )
+            try:
+                asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
+                asyncio.run(client._get_or_create_machine_channel("10.0.0.2", 5007))
+                assert len(client._machine_channels) == 2
+
+                asyncio.run(client.refresh_token("new-token"))
+                assert client._gateway_channel is None
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_raises_when_closed(self):
+        """refresh_token() raises RuntimeError when client is closed."""
+        with patch("fleet_client.client.grpc"):
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=False,
+            )
+            try:
+                asyncio.run(client.close())
+                with pytest.raises(RuntimeError, match="Client is closed"):
+                    asyncio.run(client.refresh_token("new-token"))
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_recreates_gateway_channel_on_next_use(self):
+        """After refresh, the next gateway call recreates the channel with new token."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_ch1 = Mock()
+            mock_ch2 = Mock()
+            mock_grpc.aio.insecure_channel.side_effect = [mock_ch1, mock_ch2]
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=False,
+            )
+            try:
+                # First channel created
+                asyncio.run(client._ensure_gateway_channel())
+                assert mock_grpc.aio.insecure_channel.call_count == 1
+
+                # Refresh — closes old channel
+                asyncio.run(client.refresh_token("new-token"))
+
+                # Next use recreates with new interceptor
+                asyncio.run(client._ensure_gateway_channel())
+                assert mock_grpc.aio.insecure_channel.call_count == 2
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_recreates_machine_channels_on_next_use(self):
+        """After refresh, machine channels are recreated on next use with new token."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_ch1 = Mock()
+            mock_ch2 = Mock()
+            mock_grpc.aio.insecure_channel.side_effect = [mock_ch1, mock_ch2]
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=False,
+            )
+            try:
+                # First machine channel created
+                asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
+                assert mock_grpc.aio.insecure_channel.call_count == 1
+
+                # Refresh — closes all channels
+                asyncio.run(client.refresh_token("new-token"))
+
+                # Next machine call recreates with new interceptor
+                asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
+                assert mock_grpc.aio.insecure_channel.call_count == 2
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_with_tls(self):
+        """refresh_token() works correctly with TLS enabled."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.secure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=True,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                assert mock_grpc.aio.secure_channel.call_count == 1
+
+                asyncio.run(client.refresh_token("new-token"))
+                mock_channel.close.assert_called_once()
+
+                asyncio.run(client._ensure_gateway_channel())
+                assert mock_grpc.aio.secure_channel.call_count == 2
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_multiple_times(self):
+        """refresh_token() can be called multiple times sequentially."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_ch1 = Mock()
+            mock_ch2 = Mock()
+            mock_ch3 = Mock()
+            mock_grpc.aio.insecure_channel.side_effect = [mock_ch1, mock_ch2, mock_ch3]
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="first-token",
+                tls_enabled=False,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                asyncio.run(client.refresh_token("second-token"))
+                asyncio.run(client._ensure_gateway_channel())
+                asyncio.run(client.refresh_token("third-token"))
+                asyncio.run(client._ensure_gateway_channel())
+
+                assert mock_grpc.aio.insecure_channel.call_count == 3
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_preserves_gateway_address(self):
+        """refresh_token() preserves the gateway address after refresh."""
+        with patch("fleet_client.client.grpc"):
+            client = FleetClient(
+                gateway_address="custom-gateway:9999",
+                token="old-token",
+                tls_enabled=False,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                asyncio.run(client.refresh_token("new-token"))
+                assert client._gateway_address == "custom-gateway:9999"
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_preserves_tls_setting(self):
+        """refresh_token() preserves tls_enabled setting after refresh."""
+        with patch("fleet_client.client.grpc"):
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=True,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                asyncio.run(client.refresh_token("new-token"))
+                assert client._tls_enabled is True
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_preserves_machine_channel_ttl(self):
+        """refresh_token() preserves machine_channel_ttl after refresh."""
+        with patch("fleet_client.client.grpc"):
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=False,
+                machine_channel_ttl=600.0,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                asyncio.run(client.refresh_token("new-token"))
+                assert client._machine_channel_ttl == 600.0
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_logs_message(self, caplog):
+        """refresh_token() logs a message about the token refresh."""
+        with patch("fleet_client.client.grpc"):
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token-abc123",
+                tls_enabled=False,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                with caplog.at_level(logging.INFO):
+                    asyncio.run(client.refresh_token("new-token-def456"))
+                assert "Token refreshed" in caplog.text
+            finally:
+                asyncio.run(client.close())
+
+    def test_refresh_with_injected_gateway_channel(self):
+        """refresh_token() handles pre-injected gateway channel gracefully."""
+        with patch("fleet_client.client.grpc"):
+            injected_channel = Mock()
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=False,
+                _gateway_channel=injected_channel,
+            )
+            try:
+                # Even with injected channel, refresh should update the token
+                asyncio.run(client.refresh_token("new-token"))
+                assert client._token == "new-token"
+                # Gateway interceptor is None when channel is injected externally
+                assert client._gateway_interceptor is None
+            finally:
+                asyncio.run(client.close())
+
+
+class TestTokenRefreshInterceptorPropagation:
+    """Tests verifying that refresh propagates to gateway interceptor."""
+
+    def test_gateway_interceptor_updated_on_channel_create(self):
+        """Creating a new channel after refresh updates the gateway interceptor."""
+        from fleet_client.auth import AioBearerAuthInterceptor
+
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="first-token",
+                tls_enabled=False,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                assert isinstance(client._gateway_interceptor, AioBearerAuthInterceptor)
+                assert client._gateway_interceptor._token == "first-token"
+
+                asyncio.run(client.refresh_token("second-token"))
+
+                # After refresh and recreate, interceptor has new token
+                asyncio.run(client._ensure_gateway_channel())
+                assert client._gateway_interceptor._token == "second-token"
+            finally:
+                asyncio.run(client.close())
+
+    def test_machine_channels_use_new_token_after_refresh(self):
+        """Machine channels created after refresh use the new token."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="old-token",
+                tls_enabled=False,
+            )
+            try:
+                # Create initial machine channel
+                asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
+
+                # Refresh the token
+                asyncio.run(client.refresh_token("new-token"))
+
+                # Create a new machine channel — should use new token
+                asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
+
+                # The second call creates a new channel with the new token
+                assert mock_grpc.aio.insecure_channel.call_count == 2
+            finally:
+                asyncio.run(client.close())

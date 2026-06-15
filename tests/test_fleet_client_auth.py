@@ -6,9 +6,11 @@ import grpc
 import pytest
 
 from fleet_client.auth import (
+    AioBearerAuthInterceptor,
     BearerAuthInterceptor,
     _ClientCallDetails,
     create_auth_interceptor,
+    create_aio_auth_interceptor,
 )
 
 
