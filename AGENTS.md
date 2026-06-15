@@ -20,7 +20,7 @@
 
 **Phase 6: FleetUI Dashboard is complete.** aiohttp web dashboard with SSE streaming, HTML/CSS UI, and XSS protections with 70/70 unit tests passing.
 
-**Total: 797/797 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh + 18 Phase 3 UI)
+**Total: 810/810 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh + 18 Phase 3 UI + 13 integration renewal)
 
 ### UI Enhancements — Token Issuance & Auto-Renewal
 
@@ -38,6 +38,21 @@ Full plan documented in `ui_enhancements.md`. All phases complete.
 | Auth status endpoint   | `fleet_ui/server.py` — `/api/auth/status` | 4 (test_fleet_ui.py) | ✅      |
 | UI auto-fetch flow     | `fleet_ui/server.py` — `handle_index` | 1 (test_fleet_ui.py) | ✅      |
 | CLI http-port          | `gateway/cli.py` — `--http-port` arg  | 1 (test_gateway_cli.py) | ✅      |
+
+### Phase 7: Integration Renewal Tests (NEW)
+
+End-to-end integration tests for full token lifecycle (issue → use → expire → renew → continue working).
+
+| Component        | Files                                 | Tests                     | Status |
+| ---------------- | ------------------------------------- | ------------------------- | ------ |
+| Token issuance   | `tests/test_integration_renewal.py` — 6 test classes | 13 (test_integration_renewal.py) | ✅      |
+
+### Key implementation notes
+
+- 13 integration tests across 6 test classes: `TestTokenIssueAndUse`, `TestTokenExpiryAndRenewal`, `TestFleetClientRenewalFlow`, `TestProactiveRenewalFlow`, `TestReactiveRenewalFlow`, `TestTokenSecurityModel`
+- Helper `_start_gateway_with_http()` starts real gRPC + HTTP servers in background threads with dynamic port allocation
+- Token TTL set to 3 seconds for tests (vs production 900s) to accelerate expiry/renewal cycles
+- Fixed: changed `MachineId(name="...")` to `DiscoverRequest(facility="")` per existing test patterns; adjusted assertions for HTTP token response format; verified viewer tokens without facility claim return empty machine list (correct policy engine behavior)
 
 ## Phase 3 Deliverables
 
