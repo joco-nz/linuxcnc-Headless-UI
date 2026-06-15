@@ -20,7 +20,9 @@
 
 **Phase 6: FleetUI Dashboard is complete.** aiohttp web dashboard with SSE streaming, HTML/CSS UI, and XSS protections with 70/70 unit tests passing.
 
-**Total: 810/810 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh + 18 Phase 3 UI + 13 integration renewal)
+**Phase 7: FleetApp E2E Integration Tests is complete.** End-to-end tests for FleetApp reactive/proactive renewal, auto-fetch startup, and full session lifecycle with real gateway + sidecar stack — 6/6 tests passing.
+
+**Total: 816/816 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh + 18 Phase 3 UI + 13 integration renewal + 6 FleetApp E2E)
 
 ### UI Enhancements — Token Issuance & Auto-Renewal
 
@@ -53,6 +55,25 @@ End-to-end integration tests for full token lifecycle (issue → use → expire 
 - Helper `_start_gateway_with_http()` starts real gRPC + HTTP servers in background threads with dynamic port allocation
 - Token TTL set to 3 seconds for tests (vs production 900s) to accelerate expiry/renewal cycles
 - Fixed: changed `MachineId(name="...")` to `DiscoverRequest(facility="")` per existing test patterns; adjusted assertions for HTTP token response format; verified viewer tokens without facility claim return empty machine list (correct policy engine behavior)
+
+### Phase 7: FleetApp E2E Integration Tests (NEW)
+
+End-to-end integration tests for FleetApp with real gateway + sidecar stack. Covers reactive renewal, proactive refresh, auto-fetch startup, and full session lifecycle.
+
+| Component        | Files                                 | Tests                     | Status |
+| ---------------- | ------------------------------------- | ------------------------- | ------ |
+| E2E integration  | `tests/test_integration_e2e.py`       | 6 (test_integration_e2e.py — NEW) | ✅      |
+
+### Key implementation notes
+
+- 6 tests across 4 test classes: `TestFleetAppReactiveRenewal`, `TestFleetAppProactiveRenewal`, `TestFleetAppAutoFetch`, `TestE2EActiveSession`
+- Full stack fixture: sidecar + gateway with HTTP token issuance (`allow_admin_token=True`, `allowed_roles=["viewer", "operator", "admin"]`)
+- Reactive renewal: FleetApp's `_grpc_call_with_retry()` catches UNAUTHENTICATED, calls `_fetch_token()`, calls `client.refresh_token()`, retries operation
+- Proactive renewal: FleetApp's `_start_proactive_refresh()` background task calls `_fetch_token()` every 30s when near-expiry
+- Auto-fetch: FleetApp with empty token calls `_fetch_token()` on startup to get JWT from gateway HTTP endpoint
+- E2E lifecycle: issues admin token → discovers machines → waits for expiry → reactive renewal fetches new token → continues working
+- `discover_machines()` swallows exceptions and returns `[]` on error (correct UI behavior)
+- Fix applied: indentation error in `test_proactive_refresh_fetches_from_gateway_http` test method
 
 ## Phase 3 Deliverables
 
