@@ -491,11 +491,28 @@ def run_server(
     use_gateway: bool = False,
     user_extractor=None,
     max_workers: int = 8,
+    metrics_port: Optional[int] = None,
 ) -> None:
     """Create, start, and block on a gRPC server.
 
     Sidecar polling must be started before calling this function.
+
+    Args:
+        sidecar: The LinuxCncSidecar instance to serve.
+        port: Port to listen on for gRPC.
+        cert_file: Server TLS certificate path (PEM).
+        key_file: Server TLS private key path (PEM).
+        root_cert_file: Root CA certificate for mTLS client verification.
+        use_gateway: If True, also expose FleetGatewayService RPCs.
+        user_extractor: Callable that extracts user from metadata dict.
+        max_workers: Number of worker threads for gRPC request handling.
+        metrics_port: Optional port for Prometheus metrics/health HTTP server.
     """
+    import asyncio
+    import threading
+
+    from aiohttp import web
+
     sidecar.run()
 
     server = create_server(
@@ -512,9 +529,60 @@ def run_server(
     server.start()
     log.info("gRPC server started on port %d", port)
 
+    http_runner = None
+    if metrics_port:
+        from linuxcnc_fleet import metrics as sidecar_metrics
+
+        async def _start_http():
+            nonlocal http_runner
+            app = web.Application()
+            app["sidecar"] = sidecar
+
+            async def handle_health(request: web.Request) -> web.Response:
+                data = sidecar_metrics.handle_health(sidecar)
+                return web.json_response(data)
+
+            async def handle_metrics(request: web.Request) -> web.Response:
+                text = sidecar_metrics.handle_metrics()
+                return web.Response(text=text, content_type="text/plain; version=0.0.4", charset="utf-8")
+
+            app.router.add_get("/health", handle_health)
+            app.router.add_get("/metrics", handle_metrics)
+
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", metrics_port)
+            await site.start()
+            http_runner = runner
+            log.info("Metrics server started on port %d", metrics_port)
+
+        def _run_http_server():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(_start_http())
+                loop.run_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                if http_runner:
+                    loop.run_until_complete(http_runner.cleanup())
+                loop.close()
+
+        metrics_thread = threading.Thread(target=_run_http_server, daemon=True)
+        metrics_thread.start()
+
     try:
         server.wait_for_termination()
     except KeyboardInterrupt:
         log.info("Shutting down gRPC server")
         server.stop(grace=5)
         sidecar.shutdown()
+        if http_runner:
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(http_runner.cleanup())
+                loop.close()
+            except Exception:
+                pass

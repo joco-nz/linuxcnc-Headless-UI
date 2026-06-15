@@ -113,6 +113,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="user",
         help="Syslog facility name (default: user). Options: kern, user, daemon, mail, syslog, auth, local0-local7.",
     )
+    parser.add_argument(
+        "--metrics-port",
+        type=int,
+        default=None,
+        help="Enable Prometheus metrics/health HTTP server on this port (e.g. 9100). Omit to disable.",
+    )
 
     return parser.parse_args(argv)
 
@@ -250,6 +256,7 @@ def main(argv: list[str] | None = None) -> None:
         use_gateway=args.gateway,
         user_extractor=user_extractor,
         max_workers=workers,
+        metrics_port=args.metrics_port,
     )
 
 

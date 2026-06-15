@@ -22,7 +22,9 @@
 
 **Phase 7: FleetApp E2E Integration Tests is complete.** End-to-end tests for FleetApp reactive/proactive renewal, auto-fetch startup, and full session lifecycle with real gateway + sidecar stack — 6/6 tests passing.
 
-**Total: 816/816 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh + 18 Phase 3 UI + 13 integration renewal + 6 FleetApp E2E)
+**Phase 8: Prometheus Metrics & Health is complete.** Prometheus metrics and readiness health endpoints for gateway and sidecar with 27/27 unit tests passing.
+
+**Total: 843/843 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh + 18 Phase 3 UI + 13 integration renewal + 6 FleetApp E2E + 27 Prometheus metrics)
 
 ### UI Enhancements — Token Issuance & Auto-Renewal
 
@@ -74,6 +76,25 @@ End-to-end integration tests for FleetApp with real gateway + sidecar stack. Cov
 - E2E lifecycle: issues admin token → discovers machines → waits for expiry → reactive renewal fetches new token → continues working
 - `discover_machines()` swallows exceptions and returns `[]` on error (correct UI behavior)
 - Fix applied: indentation error in `test_proactive_refresh_fetches_from_gateway_http` test method
+
+### Phase 8: Prometheus Metrics & Health (NEW)
+
+Prometheus metrics and readiness health endpoints for gateway and sidecar with 27/27 unit tests passing.
+
+| Component        | Files                                 | Tests                     | Status |
+| ---------------- | ------------------------------------- | ------------------------- | ------ |
+| Sidecar metrics  | `linuxcnc_fleet/metrics.py` (85 lines)| 12 (test_sidecar_metrics.py — NEW) | ✅      |
+| Gateway metrics  | `gateway/metrics.py` (98 lines)       | 16 (test_gateway_metrics.py — NEW) | ✅      |
+
+### Key implementation notes
+
+- Readiness-only health endpoint — returns `{"status": "ok", ...}` without liveness probe
+- Gateway reuses existing `--http-port` aiohttp AppRunner — adds `/health` and `/metrics` routes
+- Sidecar gets new `--metrics-port` flag — separate HTTP server via aiohttp on opt-in port
+- Metrics format: Prometheus text exposition (`text/plain; version=0.0.4`)
+- Sidecar metrics: counters for polls, HAL reads/writes, commands, errors + gauge for snapshot state
+- Gateway metrics: counters for RPCs, broadcasts, tokens issued + gauges for registered machines
+- Registry access: gateway metrics read from `MachineRegistry`; sidecar reads from `LinuxCncSidecar` snapshot
 
 ## Phase 3 Deliverables
 

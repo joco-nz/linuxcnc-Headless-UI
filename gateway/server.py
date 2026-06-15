@@ -706,8 +706,11 @@ def run_gateway_server(
 
         async def _start_http():
             nonlocal http_runner
+            from gateway import metrics as gateway_metrics
+
             runner = aiohttp.web.AppRunner(aiohttp.web.Application())
             runner.app["token_servicer"] = token_servicer
+            runner.app["registry"] = registry
 
             @runner.app.on_startup.register
             async def _startup(app):
@@ -723,6 +726,16 @@ def run_gateway_server(
                     await site.stop()
                 log.info("HTTP token server stopped")
 
+            async def handle_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
+                data = gateway_metrics.handle_health(registry)
+                return aiohttp.web.json_response(data)
+
+            async def handle_metrics(request: aiohttp.web.Request) -> aiohttp.web.Response:
+                text = gateway_metrics.handle_metrics()
+                return aiohttp.web.Response(text=text, content_type="text/plain; version=0.0.4", charset="utf-8")
+
+            runner.app.router.add_get("/health", handle_health)
+            runner.app.router.add_get("/metrics", handle_metrics)
             runner.app.router.add_post(
                 "/api/auth/token",
                 _handle_auth_token_wrapper(token_servicer),
