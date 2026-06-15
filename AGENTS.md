@@ -20,19 +20,24 @@
 
 **Phase 6: FleetUI Dashboard is complete.** aiohttp web dashboard with SSE streaming, HTML/CSS UI, and XSS protections with 70/70 unit tests passing.
 
-**Total: 779/779 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh)
+**Total: 797/797 tests passing** (612 original + 35 token issuance + 18 CLI HTTP args + 14 UI enhancements + 35 token refresh + 18 Phase 3 UI)
 
 ### UI Enhancements — Token Issuance & Auto-Renewal
 
-Full plan documented in `ui_enhancements.md`. Phase 1 and Phase 2 are complete.
+Full plan documented in `ui_enhancements.md`. All phases complete.
 
-| Component        | Files                                 | Tests                     | Status |
-| ---------------- | ------------------------------------- | ------------------------- | ------ |
-| Token servicer   | `gateway/server.py` — `TokenIssuanceServicer` | 35 (test_token_issuance.py) | ✅      |
-| HTTP route       | `gateway/server.py` — `_handle_auth_token`, `_handle_auth_token_wrapper` | —                          | ✅      |
-| CLI args         | `gateway/cli.py` — 7 new arguments    | 18 (test_gateway_cli.py appended) | ✅      |
-| Interceptor refresh | `fleet_client/auth.py` — `refresh_token()` on both classes | 15 (test_fleet_client_auth.py appended) | ✅      |
-| FleetClient refresh | `fleet_client/client.py` — `refresh_token()` method | 17 (test_fleet_client.py appended) | ✅      |
+| Component              | Files                                 | Tests                     | Status |
+| ---------------------- | ------------------------------------- | ------------------------- | ------ |
+| Token servicer         | `gateway/server.py` — `TokenIssuanceServicer` | 35 (test_token_issuance.py) | ✅      |
+| HTTP route             | `gateway/server.py` — `_handle_auth_token`, `_handle_auth_token_wrapper` | —                          | ✅      |
+| CLI args               | `gateway/cli.py` — 7 new arguments    | 18 (test_gateway_cli.py appended) | ✅      |
+| Interceptor refresh    | `fleet_client/auth.py` — `refresh_token()` on both classes | 15 (test_fleet_client_auth.py appended) | ✅      |
+| FleetClient refresh    | `fleet_client/client.py` — `refresh_token()` method | 17 (test_fleet_client.py appended) | ✅      |
+| FleetApp proactive     | `fleet_ui/server.py` — `_start_proactive_refresh()` | 3 (test_fleet_ui.py) | ✅      |
+| FleetApp reactive      | `fleet_ui/server.py` — `_grpc_call_with_retry()` | 2 (test_fleet_ui.py) | ✅      |
+| Auth status endpoint   | `fleet_ui/server.py` — `/api/auth/status` | 4 (test_fleet_ui.py) | ✅      |
+| UI auto-fetch flow     | `fleet_ui/server.py` — `handle_index` | 1 (test_fleet_ui.py) | ✅      |
+| CLI http-port          | `gateway/cli.py` — `--http-port` arg  | 1 (test_gateway_cli.py) | ✅      |
 
 ## Phase 3 Deliverables
 

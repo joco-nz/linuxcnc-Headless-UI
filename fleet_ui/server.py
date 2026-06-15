@@ -10,6 +10,7 @@ import ssl
 from typing import Any, Optional
 
 import aiohttp
+import grpc
 from aiohttp import web
 
 try:
@@ -66,17 +67,22 @@ class FleetApp:
         tls_enabled: bool = False,
         _mock_client: Any = None,
         timeout: float = 120.0,
+        gateway_http_port: int | None = None,
     ) -> None:
         self._gateway_address = gateway_address
         self._token = token
         self._tls_enabled = tls_enabled
         self._mock_client = _mock_client
         self._timeout = timeout
+        self._gateway_http_port = gateway_http_port
         self._client: Optional[FleetClient] = None
         self._machines: list[MachineEntry] = []
         self._streams: dict[str, _SSEStream] = {}  # machine_id -> stream
         self._last_status: dict[str, dict] = {}
         self._lock = asyncio.Lock()
+        self._proactive_task: asyncio.Task | None = None
+        self._token_expiry: float = 0.0
+        self._connecting = False
 
     async def init(self) -> None:
         if self._mock_client is not None:
@@ -89,7 +95,83 @@ class FleetApp:
             tls_enabled=self._tls_enabled,
         )
 
+    async def _fetch_token(self) -> str | None:
+        """Fetch a new JWT token from the gateway's HTTP token endpoint."""
+        if self._mock_client is not None:
+            return None
+        try:
+            http_port = self._gateway_http_port or 50053
+            url = f"http://{self._gateway_address.split(':')[0]}:{http_port}/api/auth/token"
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, params={"role": "viewer", "sub": "fleet-ui"},
+                                        timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        token = data.get("token", "")
+                        expiry = data.get("expires_at", 0)
+                        if token:
+                            self._token = token
+                            self._token_expiry = expiry
+                            log.info("Token refreshed via HTTP (expires at %s)", expiry)
+                            return token
+                    else:
+                        error_text = await resp.text()
+                        log.warning("Token fetch failed: %d %s", resp.status, error_text)
+        except Exception as e:
+            log.warning("Token fetch error: %s", e)
+        return None
+
+    async def _refresh_and_retry(self, operation):
+        """Refresh token and retry a gRPC operation once."""
+        new_token = await self._fetch_token()
+        if not new_token or not self._client:
+            return None
+        try:
+            await self._client.refresh_token(new_token)
+        except Exception as e:
+            log.error("Token refresh failed: %s", e)
+            return None
+        try:
+            return await operation()
+        except Exception as retry_err:
+            log.warning("Retry after token refresh failed: %s", retry_err)
+            return None
+
+    def _is_token_expired(self) -> bool:
+        """Check if the current token is expired or near-expiry (within 5 minutes)."""
+        if not self._token_expiry:
+            return False
+        import time
+        return (self._token_expiry - time.time()) < 300
+
+    async def _start_proactive_refresh(self) -> None:
+        """Start background task that proactively refreshes tokens before expiry."""
+        if self._proactive_task is not None:
+            return
+
+        async def _poll_loop() -> None:
+            while True:
+                await asyncio.sleep(30)
+                if self._mock_client is not None or not self._client:
+                    continue
+                if self._is_token_expired():
+                    new_token = await self._fetch_token()
+                    if new_token and self._client:
+                        try:
+                            await self._client.refresh_token(new_token)
+                        except Exception as e:
+                            log.error("Proactive token refresh failed: %s", e)
+
+        self._proactive_task = asyncio.create_task(_poll_loop())
+
     async def close(self) -> None:
+        if self._proactive_task:
+            self._proactive_task.cancel()
+            try:
+                await self._proactive_task
+            except asyncio.CancelledError:
+                pass
+            self._proactive_task = None
         client = self._mock_client if self._mock_client is not None else self._client
         if client:
             await client.close()
@@ -101,12 +183,24 @@ class FleetApp:
             await self.init()
         return self._client
 
+    async def _grpc_call_with_retry(self, operation, fallback=None):
+        """Execute a gRPC call with UNAUTHENTICATED retry logic."""
+        try:
+            return await operation()
+        except grpc.aio.AioRpcError as e:
+            if e.code() == grpc.StatusCode.UNAUTHENTICATED:
+                log.warning("UNAUTHENTICATED error — attempting token refresh")
+                result = await self._refresh_and_retry(operation)
+                if result is not None:
+                    return result
+            raise
+
     # ── Machine Discovery ────────────────────────────────────────────────
 
     async def discover_machines(self) -> list[dict]:
         client = await self._ensure_client()
         try:
-            machines = await client.get_machines()
+            machines = await self._grpc_call_with_retry(lambda: client.get_machines())
             async with self._lock:
                 self._machines = machines
             return [
@@ -127,7 +221,7 @@ class FleetApp:
     async def get_status(self, machine_id: str) -> Optional[dict]:
         client = await self._ensure_client()
         try:
-            status = await client.get_status(machine_id)
+            status = await self._grpc_call_with_retry(lambda: client.get_status(machine_id))
             result = _status_to_dict(status)
             async with self._lock:
                 self._last_status[machine_id] = result
@@ -139,7 +233,7 @@ class FleetApp:
     async def get_machine_info(self, machine_id: str) -> Optional[dict]:
         client = await self._ensure_client()
         try:
-            info = await client.get_machine_info(machine_id)
+            info = await self._grpc_call_with_retry(lambda: client.get_machine_info(machine_id))
             return _info_to_dict(info)
         except Exception as e:
             log.error("GetInfo %s failed: %s", machine_id, e)
@@ -148,7 +242,7 @@ class FleetApp:
     async def set_mode(self, machine_id: str, mode: str) -> dict:
         client = await self._ensure_client()
         try:
-            result = await client.set_mode(machine_id, _mode_to_int(mode))
+            result = await self._grpc_call_with_retry(lambda: client.set_mode(machine_id, _mode_to_int(mode)))
             return {"success": result.success, "message": result.message}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -156,7 +250,7 @@ class FleetApp:
     async def send_mdi(self, machine_id: str, command: str) -> dict:
         client = await self._ensure_client()
         try:
-            result = await client.send_mdi(machine_id, command)
+            result = await self._grpc_call_with_retry(lambda: client.send_mdi(machine_id, command))
             return {"success": result.success, "message": result.message}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -164,7 +258,7 @@ class FleetApp:
     async def load_program(self, machine_id: str, path: str) -> dict:
         client = await self._ensure_client()
         try:
-            result = await client.load_program(machine_id, path)
+            result = await self._grpc_call_with_retry(lambda: client.load_program(machine_id, path))
             return {"success": result.success, "message": result.message}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -173,7 +267,7 @@ class FleetApp:
                                       facility: str = "", tags: list[str] | None = None) -> dict:
         client = await self._ensure_client()
         try:
-            results = await client.broadcast_load_program(scope, path, facility, tags or [])
+            results = await self._grpc_call_with_retry(lambda: client.broadcast_load_program(scope, path, facility, tags or []))
             return {"results": {mid: {"success": s, "message": m} for mid, (s, m) in results.items()}}
         except Exception as e:
             return {"error": str(e)}
@@ -181,7 +275,7 @@ class FleetApp:
     async def list_programs(self, machine_id: str, directory: str = "", max_depth: int = 0) -> dict:
         client = await self._ensure_client()
         try:
-            pl = await client.list_programs(machine_id, directory, max_depth)
+            pl = await self._grpc_call_with_retry(lambda: client.list_programs(machine_id, directory, max_depth))
             return {
                 "programs": [
                     {"path": p.path, "name": p.name, "size_bytes": p.size_bytes, "modified_time": p.modified_time}
@@ -196,15 +290,15 @@ class FleetApp:
         client = await self._ensure_client()
         try:
             if cmd == "start":
-                result = await client.start(machine_id)
+                result = await self._grpc_call_with_retry(lambda: client.start(machine_id))
             elif cmd == "stop":
-                result = await client.stop(machine_id)
+                result = await self._grpc_call_with_retry(lambda: client.stop(machine_id))
             elif cmd == "feed_hold":
-                result = await client.feed_hold(machine_id)
+                result = await self._grpc_call_with_retry(lambda: client.feed_hold(machine_id))
             elif cmd == "continue_exec":
-                result = await client.continue_exec(machine_id)
+                result = await self._grpc_call_with_retry(lambda: client.continue_exec(machine_id))
             elif cmd == "home_all":
-                result = await client.home_all(machine_id)
+                result = await self._grpc_call_with_retry(lambda: client.home_all(machine_id))
             else:
                 return {"success": False, "message": f"Unknown control: {cmd}"}
             return {"success": result.success, "message": result.message}
@@ -214,7 +308,7 @@ class FleetApp:
     async def list_hal(self, machine_id: str) -> Optional[list[dict]]:
         client = await self._ensure_client()
         try:
-            hal_list = await client.list_hal_components(machine_id)
+            hal_list = await self._grpc_call_with_retry(lambda: client.list_hal_components(machine_id))
             components = []
             for comp in hal_list.components:
                 pins = [
@@ -244,7 +338,7 @@ class FleetApp:
     async def read_hal_pin(self, machine_id: str, pin_name: str) -> Optional[dict]:
         client = await self._ensure_client()
         try:
-            pin = await client.read_hal_pin(machine_id, pin_name)
+            pin = await self._grpc_call_with_retry(lambda: client.read_hal_pin(machine_id, pin_name))
             return {
                 "pin_name": pin.pin_name,
                 "type": _hal_type_to_str(pin.type),
@@ -269,13 +363,8 @@ class FleetApp:
             if error_msg:
                 return {"success": False, "message": error_msg}
 
-            result = await client.write_hal_pin(
-                machine_id, pin_name,
-                bit_value=bit_val,
-                float_value=float_val,
-                u32_value=u32_val,
-                s32_value=s32_val,
-            )
+            result = await self._grpc_call_with_retry(
+                lambda: client.write_hal_pin(machine_id, pin_name, bit_value=bit_val, float_value=float_val, u32_value=u32_val, s32_value=s32_val))
             return {"success": result.success, "message": result.message}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -283,7 +372,7 @@ class FleetApp:
     async def get_errors(self, machine_id: str) -> list[dict]:
         client = await self._ensure_client()
         try:
-            err_list = await client.get_errors(machine_id, limit=50)
+            err_list = await self._grpc_call_with_retry(lambda: client.get_errors(machine_id, limit=50))
             return [
                 {"message": e.message, "timestamp": e.timestamp}
                 for e in err_list.errors
@@ -923,6 +1012,9 @@ main {
 <header id="header">
   <h1>LinuxCNC Fleet</h1>
   <span class="subtitle" id="gateway-status">Connecting...</span>
+  <div id="connecting-banner" class="hidden" style="flex:1;text-align:center;color:var(--accent-blue);font-size:13px;">
+    Connecting to gateway...
+  </div>
 </header>
 
 <main id="main-view">
@@ -1082,6 +1174,28 @@ function escapeHtml(str) {
     document.getElementById('cfg-gateway').value = gateway;
     document.getElementById('cfg-token').value = token;
     connect();
+  } else if (!token && gateway) {
+    // No token provided — poll /api/auth/status until connected
+    var banner = document.getElementById('connecting-banner');
+    banner.classList.remove('hidden');
+    (function pollStatus() {
+      fetch('/api/auth/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.is_connected || data.connecting) {
+            document.getElementById('config-view').classList.add('hidden');
+            document.getElementById('dashboard-view').classList.remove('hidden');
+            banner.classList.add('hidden');
+            document.getElementById('gateway-status').textContent = 'Gateway: ' + gateway;
+            refreshMachines();
+          } else {
+            setTimeout(pollStatus, 2000);
+          }
+        })
+        .catch(function() {
+          setTimeout(pollStatus, 3000);
+        });
+    })();
   }
 })();
 
@@ -1677,6 +1791,11 @@ async def handle_connect(request: web.Request) -> web.Response:
         await app_state.init()
 
         machines = await app_state.discover_machines()
+
+        # Start proactive refresh if we have a valid client
+        if app_state._client and not getattr(app_state._client, '_closed', False):
+            await app_state._start_proactive_refresh()
+
         return web.json_response({'status': 'connected', 'machines': len(machines)})
     except Exception as e:
         log.error("Connect failed: %s", e)
@@ -1946,12 +2065,26 @@ async def handle_errors(request: web.Request) -> web.Response:
     return web.json_response(errors)
 
 
+async def handle_auth_status(request: web.Request) -> web.Response:
+    """Get token/connection status for UI polling."""
+    app_state = request.app['fleet']
+    has_token = bool(app_state._token)
+    is_connected = app_state._client is not None and not getattr(app_state._client, '_closed', True)
+    return web.json_response({
+        "has_token": has_token,
+        "is_connected": is_connected,
+        "connecting": app_state._connecting,
+        "token_expiry": app_state._token_expiry,
+    })
+
+
 # ── Router Setup ─────────────────────────────────────────────────────────────
 
 def create_routes(app: web.Application) -> None:
     """Register all API routes."""
     app.router.add_get('/', handle_index)
     app.router.add_post('/api/connect', handle_connect)
+    app.router.add_get('/api/auth/status', handle_auth_status)
     app.router.add_get('/api/machines', handle_machines)
     app.router.add_get('/api/status/{id}', handle_status)
     app.router.add_get('/api/stream/status/{id}', handle_stream)
@@ -1976,6 +2109,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='LinuxCNC Fleet Dashboard UI')
     parser.add_argument('--gateway', default=os.environ.get('FLEET_UI_GATEWAY', 'localhost:50052'), help='Gateway address (host:port)')
     parser.add_argument('--token', default=os.environ.get('FLEET_UI_TOKEN'), help='JWT token for authentication')
+    parser.add_argument('--http-port', type=int, default=int(os.environ.get('FLEET_UI_HTTP_PORT', '50053')), help='Gateway HTTP port for token fetching (default: 50053)')
     parser.add_argument('--bind', default='0.0.0.0', help='Bind address (default: 0.0.0.0 for all interfaces)')
     parser.add_argument('--port', type=int, default=int(os.environ.get('FLEET_UI_PORT', '8080')), help='HTTP listen port')
     parser.add_argument('--allow-origin', default=os.environ.get('FLEET_UI_ALLOW_ORIGIN', '*'), help='CORS allowed origin (default: * for all, or specific URL like http://example.com)')
@@ -1994,12 +2128,29 @@ async def on_startup(app: web.Application) -> None:
         token=args.token or '',
         tls_enabled=bool(args.tls_cert),
         timeout=float(args.timeout),
+        gateway_http_port=args.http_port if hasattr(args, 'http_port') else None,
     )
-    try:
-        await fleet_app.init()
-        log.info("FleetClient initialized — connected to %s", args.gateway)
-    except Exception as e:
-        log.warning("Initial connection failed (UI will work once connected via config form): %s", e)
+
+    # If no token provided, try to auto-fetch from gateway HTTP endpoint
+    if not args.token:
+        fleet_app._connecting = True
+        fetched_token = await fleet_app._fetch_token()
+        if fetched_token and fleet_app._client is None:
+            fleet_app._token = fetched_token
+            await fleet_app.init()
+            log.info("Auto-connected to %s with fetched token", args.gateway)
+        else:
+            log.warning("Could not auto-fetch token — UI will show config form")
+    else:
+        try:
+            await fleet_app.init()
+            log.info("FleetClient initialized — connected to %s", args.gateway)
+        except Exception as e:
+            log.warning("Initial connection failed (UI will work once connected via config form): %s", e)
+
+    # Start proactive token refresh if we have a client
+    if fleet_app._client and not getattr(fleet_app._client, '_closed', False):
+        await fleet_app._start_proactive_refresh()
 
     app['fleet'] = fleet_app
 
@@ -2018,6 +2169,10 @@ def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format='%(asctime)s %(levelname)-8s %(name)s: %(message)s',
     )
+
+    # Ensure http_port is available for auto-fetch
+    if not hasattr(args, 'http_port'):
+        args.http_port = 50053
 
     app = web.Application()
     app['args'] = args

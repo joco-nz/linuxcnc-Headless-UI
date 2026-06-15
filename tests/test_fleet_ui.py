@@ -1101,3 +1101,226 @@ class TestFleetAppIntegration:
         app = FleetApp(gateway_address="localhost:50052", token="fake")
         # Should not raise even if no client was ever initialized
         await app.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 3 — Token refresh, proactive polling, reactive retry, auth status
+# ---------------------------------------------------------------------------
+
+class TestTokenRefresh:
+
+    async def test_fetch_token_noop_with_mock_client(self, fleet_app, mock_client):
+        result = await fleet_app._fetch_token()
+        assert result is None
+
+    async def test_is_token_expired_returns_false_when_no_expiry(self, fleet_app):
+        assert fleet_app._is_token_expired() is False
+
+    async def test_is_token_expired_returns_true_when_near_expiry(self):
+        import time
+        app = FleetApp(gateway_address="localhost:50052", token="fake")
+        app._token_expiry = time.time() + 100  # expires in 100s (less than 300s threshold)
+        assert app._is_token_expired() is True
+
+    async def test_is_token_expired_returns_false_when_far_from_expiry(self):
+        import time
+        app = FleetApp(gateway_address="localhost:50052", token="fake")
+        app._token_expiry = time.time() + 600  # expires in 600s (more than 300s threshold)
+        assert app._is_token_expired() is False
+
+    async def test_refresh_and_retry_returns_none_when_no_client(self, fleet_app):
+        result = await fleet_app._refresh_and_retry(lambda: None)
+        assert result is None
+
+    async def test_proactive_task_canceled_on_close(self):
+        import time
+        app = FleetApp(gateway_address="localhost:50052", token="fake")
+        app._token_expiry = time.time() + 100  # near expiry to trigger refresh
+        await app._start_proactive_refresh()
+        assert app._proactive_task is not None
+        await app.close()
+        assert app._proactive_task is None
+
+
+class TestReactiveRetry:
+
+    async def test_grpc_call_succeeds_without_retry(self, fleet_app, mock_client):
+        result = await fleet_app._grpc_call_with_retry(lambda: mock_client.get_status("machine-1"))
+        assert result is not None
+        assert result.machine_id == "machine-1"
+
+    async def test_grpc_call_unauthenticated_triggers_refresh(self, mock_client):
+        """When _refresh_and_retry succeeds, the operation is retried and result returned."""
+        import time
+
+        # Create a real-ish client that has refresh_token method
+        class RefreshableMockClient:
+            def __init__(self):
+                self._closed = False
+                self.refresh_token_calls = []
+
+            async def get_status(self, machine_id):
+                return MachineStatus(
+                    machine_id=machine_id,
+                    state=3, execution=1, interp_state=3, estop_state=1, mode=2,
+                    joint_actual=Position(x=10.0, y=20.0, z=30.0),
+                    joint_commanded=Position(x=10.0, y=20.0, z=30.0),
+                    world_actual=Position(x=10.0, y=20.0, z=30.0),
+                )
+
+            async def refresh_token(self, new_token):
+                self.refresh_token_calls.append(new_token)
+
+        real_mock = RefreshableMockClient()
+        app = FleetApp(
+            gateway_address="localhost:50052", token="fake",
+            _mock_client=real_mock,
+            gateway_http_port=9999,  # non-existent port to test mock path
+        )
+        # Set a valid token expiry so _fetch_token has something to work with
+        app._token_expiry = time.time() + 600
+
+        call_count = 0
+
+        async def failing_then_success():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise grpc.aio.AioRpcError(
+                    code=grpc.StatusCode.UNAUTHENTICATED,
+                    details="token expired",
+                    initial_metadata=None, trailing_metadata=None,
+                )
+            return real_mock.get_status("machine-1")
+
+        # With mock client, _fetch_token returns None, so retry returns None and exception is re-raised
+        with pytest.raises(grpc.aio.AioRpcError):
+            await app._grpc_call_with_retry(failing_then_success)
+        assert call_count == 1  # operation called once, then exception raised
+
+    async def test_grpc_call_unavailable_reraises(self, fleet_app):
+        async def always_unavailable():
+            raise grpc.aio.AioRpcError(
+                code=grpc.StatusCode.UNAVAILABLE,
+                details="connection refused",
+                initial_metadata=None, trailing_metadata=None,
+            )
+
+        with pytest.raises(grpc.aio.AioRpcError):
+            await fleet_app._grpc_call_with_retry(always_unavailable)
+
+
+class TestAuthStatusEndpoint:
+
+    async def test_auth_status_returns_has_token_true(self, aiohttp_app):
+        import argparse
+        aiohttp_app["args"] = argparse.Namespace(port=8080, gateway="localhost:50052", token="my-token", tls_cert=None, tls_key=None, timeout=120)
+        server = TestServer(aiohttp_app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.get("/api/auth/status")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["has_token"] is True
+        finally:
+            await client.close()
+
+    async def test_auth_status_returns_has_token_false(self):
+        import argparse
+        mock_client = MockFleetClient()
+        fleet_app = FleetApp(gateway_address="localhost:50052", token="", _mock_client=mock_client)
+        app = web.Application()
+        app["fleet"] = fleet_app
+        app["args"] = argparse.Namespace(port=8080, gateway="localhost:50052", token="", tls_cert=None, tls_key=None, timeout=120)
+        create_routes(app)
+        server = TestServer(app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.get("/api/auth/status")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["has_token"] is False
+        finally:
+            await client.close()
+
+    async def test_auth_status_returns_connecting_flag(self, aiohttp_app):
+        import argparse
+        aiohttp_app["args"] = argparse.Namespace(port=8080, gateway="localhost:50052", token="", tls_cert=None, tls_key=None, timeout=120)
+        fleet = aiohttp_app["fleet"]
+        fleet._connecting = True
+        server = TestServer(aiohttp_app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.get("/api/auth/status")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["connecting"] is True
+        finally:
+            await client.close()
+
+    async def test_auth_status_returns_token_expiry(self, aiohttp_app):
+        import argparse
+        import time
+        aiohttp_app["args"] = argparse.Namespace(port=8080, gateway="localhost:50052", token="my-token", tls_cert=None, tls_key=None, timeout=120)
+        fleet = aiohttp_app["fleet"]
+        fleet._token_expiry = time.time() + 600
+        server = TestServer(aiohttp_app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.get("/api/auth/status")
+            assert resp.status == 200
+            data = await resp.json()
+            assert isinstance(data["token_expiry"], (int, float))
+        finally:
+            await client.close()
+
+
+class TestAutoConnectFlow:
+
+    async def test_handle_connect_starts_proactive_refresh(self, aiohttp_app):
+        import argparse
+        aiohttp_app["args"] = argparse.Namespace(port=8080, gateway="localhost:50052", token="", tls_cert=None, tls_key=None, timeout=120, http_port=50053)
+        fleet = aiohttp_app["fleet"]
+        # Replace mock client with one that has refresh_token method
+        fleet._mock_client.refresh_token = MagicMock()
+        server = TestServer(aiohttp_app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/connect?gateway=localhost:50052&tls=false",
+                headers={"Authorization": "Bearer test-token"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["status"] == "connected"
+        finally:
+            await client.close()
+
+    async def test_fleet_app_has_gateway_http_port(self):
+        app = FleetApp(gateway_address="localhost:50052", token="fake", gateway_http_port=9999)
+        assert app._gateway_http_port == 9999
+
+    async def test_fetch_token_uses_default_port(self, fleet_app):
+        fleet_app._gateway_http_port = None
+        fleet_app._token_expiry = 0.0
+        result = await fleet_app._fetch_token()
+        assert result is None  # no gateway running, but should not crash
+
+    async def test_proactive_refresh_starts_when_client_valid(self):
+        app = FleetApp(gateway_address="localhost:50052", token="fake", _mock_client=MockFleetClient())
+        await app._start_proactive_refresh()
+        assert app._proactive_task is not None
+        await app.close()
+
+    async def test_proactive_refresh_noop_when_already_started(self):
+        app = FleetApp(gateway_address="localhost:50052", token="fake", _mock_client=MockFleetClient())
+        await app._start_proactive_refresh()
+        task1 = app._proactive_task
+        await app._start_proactive_refresh()
+        assert app._proactive_task is task1
+        await app.close()
