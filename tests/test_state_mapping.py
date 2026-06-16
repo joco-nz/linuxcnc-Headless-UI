@@ -27,10 +27,10 @@ class TestMapMachineState:
         stat.state = linuxcnc_module.RCS_DONE
         assert _map_machine_state(stat) == MachineState.AUTO_DONE
 
-    def test_rcs_running_maps_to_running(self, linuxcnc_module):
-        """RCS_RUNNING → RUNNING."""
+    def test_rcs_exec_maps_to_running(self, linuxcnc_module):
+        """RCS_EXEC → RUNNING."""
         stat = linuxcnc_module.stat()
-        stat.state = linuxcnc_module.RCS_RUNNING
+        stat.state = linuxcnc_module.RCS_EXEC
         assert _map_machine_state(stat) == MachineState.RUNNING
 
     def test_rcs_idle_maps_to_off(self, linuxcnc_module):
@@ -39,11 +39,11 @@ class TestMapMachineState:
         stat.state = linuxcnc_module.RCS_IDLE
         assert _map_machine_state(stat) == MachineState.OFF
 
-    def test_unknown_value_maps_to_unknown(self, linuxcnc_module):
-        """Unknown state value → UNKNOWN."""
+    def test_unknown_value_maps_to_off(self, linuxcnc_module):
+        """Unknown state value → OFF (default fallback)."""
         stat = linuxcnc_module.stat()
         stat.state = 99
-        assert _map_machine_state(stat) == MachineState.UNKNOWN
+        assert _map_machine_state(stat) == MachineState.OFF
 
 
 class TestMapExecutionState:

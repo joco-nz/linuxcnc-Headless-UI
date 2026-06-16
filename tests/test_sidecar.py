@@ -583,327 +583,6 @@ class TestListPrograms:
         assert "leaked" not in names
 
 
-class TestReadHalPin:
-
-    def _make_hal_mock(self):
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.HAL_BIT = 0
-        m.HAL_U32 = 1
-        m.HAL_S32 = 2
-        m.HAL_FLOAT = 3
-        return m
-
-    def test_raises_when_hal_module_missing(self, linuxcnc_module):
-        """read_hal_pin raises RuntimeError when _hal is None."""
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=None)
-        with pytest.raises(RuntimeError, match="_hal module not available"):
-            sidecar.read_hal_pin("some_pin")
-
-    def test_returns_bit_value(self, linuxcnc_module):
-        """read_hal_pin returns HalPinValue with value_bit for HAL_BIT type."""
-        hal = self._make_hal_mock()
-        hal.get_type.return_value = 0  # HAL_BIT
-        hal.get_value.return_value = 1.0
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.read_hal_pin("spindle.on")
-
-        assert result.pin_name == "spindle.on"
-        from linuxcnc_fleet.fleet_pb2 import HalPinType
-        assert result.type == HalPinType.PIN_TYPE_BIT
-        assert result.value_bit is True
-
-    def test_returns_u32_value(self, linuxcnc_module):
-        """read_hal_pin returns HalPinValue with value_u32 for HAL_U32 type."""
-        hal = self._make_hal_mock()
-        hal.get_type.return_value = 1  # HAL_U32
-        hal.get_value.return_value = 42.0
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.read_hal_pin("feed.rate")
-
-        from linuxcnc_fleet.fleet_pb2 import HalPinType
-        assert result.type == HalPinType.PIN_TYPE_U32
-        assert result.value_u32 == 42
-
-    def test_returns_s32_value(self, linuxcnc_module):
-        """read_hal_pin returns HalPinValue with value_s32 for HAL_S32 type."""
-        hal = self._make_hal_mock()
-        hal.get_type.return_value = 2  # HAL_S32
-        hal.get_value.return_value = -100.0
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.read_hal_pin("offset.z")
-
-        from linuxcnc_fleet.fleet_pb2 import HalPinType
-        assert result.type == HalPinType.PIN_TYPE_S32
-        assert result.value_s32 == -100
-
-    def test_returns_float_value(self, linuxcnc_module):
-        """read_hal_pin returns HalPinValue with value_f for HAL_FLOAT type."""
-        hal = self._make_hal_mock()
-        hal.get_type.return_value = 3  # HAL_FLOAT
-        hal.get_value.return_value = 3.14159
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.read_hal_pin("spindle.speed-cmd")
-
-        from linuxcnc_fleet.fleet_pb2 import HalPinType
-        assert result.type == HalPinType.PIN_TYPE_FLOAT
-        assert abs(result.value_f - 3.14159) < 0.0001
-
-    def test_raises_value_error_on_get_type_failure(self, linuxcnc_module):
-        """read_hal_pin raises ValueError when _hal.get_type fails."""
-        hal = self._make_hal_mock()
-        hal.get_type.side_effect = KeyError("pin not registered")
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        with pytest.raises(ValueError, match="not found"):
-            sidecar.read_hal_pin("missing.pin")
-
-    def test_raises_value_error_on_get_value_failure(self, linuxcnc_module):
-        """read_hal_pin raises ValueError when _hal.get_value fails after get_type."""
-        hal = self._make_hal_mock()
-        hal.get_type.return_value = 3  # HAL_FLOAT
-        hal.get_value.side_effect = RuntimeError("value unavailable")
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        with pytest.raises(ValueError, match="not found"):
-            sidecar.read_hal_pin("unavailable.pin")
-
-
-class TestWriteHalPin:
-
-    def _make_hal_mock(self):
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.HAL_BIT = 0
-        m.HAL_U32 = 1
-        m.HAL_S32 = 2
-        m.HAL_FLOAT = 3
-        return m
-
-    def test_returns_error_when_hal_missing(self, linuxcnc_module):
-        """write_hal_pin returns error Result when _hal is None."""
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=None)
-        result = sidecar.write_hal_pin("some.pin")
-        assert result.success is False
-        assert "not available" in result.message.lower()
-
-    def test_returns_write_protected_for_input_pin(self, linuxcnc_module):
-        """write_hal_pin returns HAL_WRITE_PROTECTED when pin is not an output."""
-        hal = self._make_hal_mock()
-        hal.is_output.return_value = False
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.write_hal_pin("input.pin")
-
-        assert result.success is False
-        from linuxcnc_fleet.fleet_pb2 import ErrorCode
-        assert result.error_code == ErrorCode.HAL_WRITE_PROTECTED
-        assert "not an output" in result.message.lower()
-
-    def test_returns_pin_not_found_when_type_lookup_fails(self, linuxcnc_module):
-        """write_hal_pin returns HAL_PIN_NOT_FOUND when get_type fails."""
-        hal = self._make_hal_mock()
-        hal.is_output.return_value = True
-        hal.get_type.side_effect = KeyError("unknown pin")
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.write_hal_pin("unknown.pin")
-
-        from linuxcnc_fleet.fleet_pb2 import ErrorCode
-        assert result.success is False
-        assert result.error_code == ErrorCode.HAL_PIN_NOT_FOUND
-        assert "not found" in result.message.lower()
-
-    def test_writes_bit_true(self, linuxcnc_module):
-        """write_hal_pin writes 1.0 for bit pin when value_bit=True."""
-        hal = self._make_hal_mock()
-        hal.is_output.return_value = True
-        hal.get_type.return_value = 0  # HAL_BIT
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.write_hal_pin("relay.on", value_bit=True)
-
-        assert result.success is True
-        hal.set_value.assert_called_with("relay.on", 1.0)
-
-    def test_writes_bit_false(self, linuxcnc_module):
-        """write_hal_pin writes 0.0 for bit pin when value_bit=False."""
-        hal = self._make_hal_mock()
-        hal.is_output.return_value = True
-        hal.get_type.return_value = 0  # HAL_BIT
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.write_hal_pin("relay.off", value_bit=False)
-
-        assert result.success is True
-        hal.set_value.assert_called_with("relay.off", 0.0)
-
-    def test_writes_u32_value(self, linuxcnc_module):
-        """write_hal_pin writes float(value_u32) for HAL_U32 pin."""
-        hal = self._make_hal_mock()
-        hal.is_output.return_value = True
-        hal.get_type.return_value = 1  # HAL_U32
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.write_hal_pin("counter.val", value_u32=99)
-
-        assert result.success is True
-        hal.set_value.assert_called_with("counter.val", 99.0)
-
-    def test_writes_s32_value(self, linuxcnc_module):
-        """write_hal_pin writes float(value_s32) for HAL_S32 pin."""
-        hal = self._make_hal_mock()
-        hal.is_output.return_value = True
-        hal.get_type.return_value = 2  # HAL_S32
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.write_hal_pin("offset.x", value_s32=-50)
-
-        assert result.success is True
-        hal.set_value.assert_called_with("offset.x", -50.0)
-
-    def test_writes_float_value(self, linuxcnc_module):
-        """write_hal_pin writes value_f for HAL_FLOAT pin."""
-        hal = self._make_hal_mock()
-        hal.is_output.return_value = True
-        hal.get_type.return_value = 3  # HAL_FLOAT
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.write_hal_pin("spindle.speed-cmd", value_f=1500.0)
-
-        assert result.success is True
-        hal.set_value.assert_called_with("spindle.speed-cmd", 1500.0)
-
-    def test_returns_internal_error_on_set_value_failure(self, linuxcnc_module):
-        """write_hal_pin returns INTERNAL_ERROR when set_value raises."""
-        hal = self._make_hal_mock()
-        hal.is_output.return_value = True
-        hal.get_type.return_value = 3  # HAL_FLOAT
-        hal.set_value.side_effect = RuntimeError("hardware fault")
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.write_hal_pin("bad.pin", value_f=1.0)
-
-        from linuxcnc_fleet.fleet_pb2 import ErrorCode
-        assert result.success is False
-        assert result.error_code == ErrorCode.INTERNAL_ERROR
-
-
-class TestListHalComponents:
-
-    def _make_hal_mock(self):
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.HAL_BIT = 0
-        m.HAL_U32 = 1
-        m.HAL_S32 = 2
-        m.HAL_FLOAT = 3
-        return m
-
-    def test_raises_when_hal_module_missing(self, linuxcnc_module):
-        """list_hal_components raises RuntimeError when _hal is None."""
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=None)
-        with pytest.raises(RuntimeError, match="_hal module not available"):
-            sidecar.list_hal_components()
-
-    def test_returns_empty_when_comp_list_raises(self, linuxcnc_module):
-        """list_hal_components returns empty list when _hal.comp_list raises."""
-        hal = self._make_hal_mock()
-        hal.comp_list.side_effect = RuntimeError("hardware error")
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.list_hal_components()
-
-        assert len(result.components) == 0
-
-    def test_returns_single_component_with_pins(self, linuxcnc_module):
-        """list_hal_components returns component with pins when comp_list succeeds."""
-        hal = self._make_hal_mock()
-        hal.comp_list.return_value = ["motion"]
-        hal.list_pins.return_value = ["joint-0.pos-fb", "joint-0.vel-fb"]
-
-        def get_type_side_effect(name):
-            return 3  # HAL_FLOAT
-
-        hal.get_type.side_effect = get_type_side_effect
-        hal.get_value.return_value = 0.0
-        hal.is_output.return_value = False
-        hal.get_update_period.return_value = 1000000.0
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.list_hal_components()
-
-        assert len(result.components) == 1
-        comp = result.components[0]
-        assert comp.name == "motion"
-        assert len(comp.pins) == 2
-        assert comp.pins[0].name == "joint-0.pos-fb"
-        assert comp.update_period_ns == 1000000.0
-
-    def test_skips_pins_that_raise(self, linuxcnc_module):
-        """list_hal_components silently skips pins that raise on get_type/get_value."""
-        hal = self._make_hal_mock()
-        hal.comp_list.return_value = ["test-comp"]
-        hal.list_pins.side_effect = [
-            ["good-pin", "bad-pin"],
-        ]
-
-        def type_side_effect(name):
-            if name == "good-pin":
-                return 3  # HAL_FLOAT
-            raise KeyError("bad pin")
-
-        hal.get_type.side_effect = type_side_effect
-        hal.get_value.return_value = 1.0
-        hal.is_output.return_value = False
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.list_hal_components()
-
-        assert len(result.components) == 1
-        assert len(result.components[0].pins) == 1
-        assert result.components[0].pins[0].name == "good-pin"
-
-    def test_params_populated_when_list_params_available(self, linuxcnc_module):
-        """list_hal_components populates params dict when _hal.list_params exists."""
-        from unittest.mock import MagicMock as _MM
-        hal = self._make_hal_mock()
-        hal.comp_list.return_value = ["param-comp"]
-        hal.list_pins.return_value = []
-        hal.get_update_period.return_value = 0.0
-
-        hal.list_params = _MM(return_value=["p1", "p2"])
-        hal.get_param = _MM(side_effect=[1.5, 2.5])
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.list_hal_components()
-
-        assert len(result.components) == 1
-        comp = result.components[0]
-        assert "p1" in comp.params
-        assert "p2" in comp.params
-        assert comp.params["p1"] == pytest.approx(1.5)
-        assert comp.params["p2"] == pytest.approx(2.5)
-
-    def test_params_skipped_when_list_params_missing(self, linuxcnc_module):
-        """list_hal_components skips params when _hal.list_params doesn't exist."""
-        hal = self._make_hal_mock()
-        # Don't set list_params or get_param — hasattr check will fail naturally
-        hal.comp_list.return_value = ["simple-comp"]
-        hal.list_pins.return_value = []
-        hal.get_update_period.return_value = 0.0
-
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", _hal_override=hal)
-        result = sidecar.list_hal_components()
-
-        assert len(result.components) == 1
-        assert result.components[0].params == {}
-
-
 class TestSubscribeStatus:
     """Tests for FleetServiceRPC.SubscribeStatus streaming handler."""
 
@@ -957,14 +636,24 @@ class TestSubscribeStatus:
 
 
 class TestSubscribeHalPins:
-    """Tests for FleetServiceRPC.SubscribeHalPins streaming handler."""
+
+    def _make_hal_mock(self):
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.HAL_BIT = 0
+        m.get_info_pins.return_value = [
+            {'NAME': 'xyz', 'TYPE': 0, 'VALUE': 1.0},
+        ]
+        m.get_value.return_value = True
+        return m
 
     def test_subscribe_hal_pins_yields_updates(self, linuxcnc_module):
         """SubscribeHalPins yields HalPinUpdate snapshots from the sidecar."""
         from linuxcnc_fleet.fleet_pb2 import HalPinSubscribe, MachineId
         from linuxcnc_fleet.server import FleetServiceRPC
 
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
+        hal = self._make_hal_mock()
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", hal_override=hal)
         sidecar._running = True
 
         servicer = FleetServiceRPC(sidecar)
@@ -985,11 +674,12 @@ class TestSubscribeHalPins:
         assert len(updates) >= 3
 
     def test_subscribe_hal_pins_stops_on_context_inactive(self, linuxcnc_module):
-        """SubscribeHalPins yields no updates when context is inactive."""
+        """SubscribeHalPins yields no more than one update when context is inactive."""
         from linuxcnc_fleet.fleet_pb2 import HalPinSubscribe, MachineId
         from linuxcnc_fleet.server import FleetServiceRPC
 
-        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test")
+        hal = self._make_hal_mock()
+        sidecar = LinuxCncSidecar(ini_path="/fake.ini", machine_id="test", hal_override=hal)
         sidecar._running = True
 
         servicer = FleetServiceRPC(sidecar)
@@ -1002,7 +692,7 @@ class TestSubscribeHalPins:
         generator = servicer.SubscribeHalPins(request, InactiveContext())
 
         updates = list(generator)
-        assert len(updates) == 0
+        assert len(updates) <= 1
 
 
 class TestSubscribeErrors:

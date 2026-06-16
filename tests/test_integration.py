@@ -106,6 +106,7 @@ def multi_sidecar_servers():
 @pytest.fixture()
 def gateway_server(sidecar_server):
     """Start a gateway server with a registered sidecar. Returns (gateway_port, registry)."""
+    import socket
     port, sidecar, stop_sidecar = sidecar_server
 
     import time as _time
@@ -124,7 +125,9 @@ def gateway_server(sidecar_server):
     )
     registry.start()
 
-    gw_port = 50100
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        gw_port = s.getsockname()[1]
 
     server = create_gateway_server(
         auth_manager=auth_manager,
@@ -146,6 +149,7 @@ def gateway_server(sidecar_server):
 @pytest.fixture()
 def multi_gateway_server(multi_sidecar_servers):
     """Start a gateway with two registered sidecars."""
+    import socket
     import time as _time
 
     from gateway.server import create_gateway_server
@@ -164,7 +168,9 @@ def multi_gateway_server(multi_sidecar_servers):
         )
     registry.start()
 
-    gw_port = 50101
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        gw_port = s.getsockname()[1]
 
     server = create_gateway_server(
         auth_manager=auth_manager,

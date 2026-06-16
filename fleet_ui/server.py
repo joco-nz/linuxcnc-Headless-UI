@@ -330,7 +330,7 @@ class FleetApp:
                 })
             return components
         except Exception as e:
-            if "_hal" in str(e):
+            if "hal" in str(e).lower():
                 return None
             log.error("ListHAL %s failed: %s", machine_id, e)
             return None

@@ -82,6 +82,7 @@ fleet_ui = ["*.py"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "-p no:xvfb"
 
 [tool.mypy]
 python_version = "3.10"

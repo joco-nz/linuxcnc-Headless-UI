@@ -10,10 +10,10 @@ def _make_mock_linuxcnc():
     """Create a mock linuxcnc module with all needed constants and classes."""
     mod = MagicMock()
 
-    # State constants
-    mod.RCS_DONE = 4
-    mod.RCS_RUNNING = 3
-    mod.RCS_IDLE = 1
+    # State constants (real LinuxCNC values)
+    mod.RCS_DONE = 1
+    mod.RCS_EXEC = 2
+    mod.RCS_IDLE = 0
 
     # Execution state constants
     mod.EXEC_STATE_IDLE = 0
@@ -155,18 +155,21 @@ def _make_mock_linuxcnc():
 
 
 def _make_mock_hal():
-    """Create a mock _hal module."""
+    """Create a mock hal module."""
     mod = MagicMock()
     mod.HAL_BIT = 0
     mod.HAL_U32 = 1
     mod.HAL_S32 = 2
     mod.HAL_FLOAT = 3
+    mod.HAL_IN = 16
+    mod.HAL_OUT = 32
+    mod.HAL_IO = 48
 
     return mod
 
 
 def pytest_configure(config):
-    """Inject linuxcnc/_hal mocks before any test modules are imported.
+    """Inject linuxcnc/hal mocks before any test modules are imported.
 
     This runs during pytest's configuration phase, before collection/imports.
     headless.py imports linuxcnc at module level — we must have our mock in
@@ -178,9 +181,9 @@ def pytest_configure(config):
             del sys.modules[key]
 
     mod = _make_mock_linuxcnc()
-    hal = _make_mock_hal()
+    hal_mod = _make_mock_hal()
     sys.modules["linuxcnc"] = mod
-    sys.modules["_hal"] = hal
+    sys.modules["hal"] = hal_mod
 
 
 def pytest_runtest_setup(item):
@@ -190,7 +193,7 @@ def pytest_runtest_setup(item):
     that can leak into subsequent tests and cause TypeError when Python's logging
     tries to compare record.levelno >= handler.level (int vs MagicMock).
 
-    Also resets the linuxcnc/_hal mock state to prevent cross-test pollution.
+    Also resets the linuxcnc/hal mock state to prevent cross-test pollution.
     """
     import logging
 
@@ -202,7 +205,7 @@ def pytest_runtest_setup(item):
         logging.root.removeHandler(handler)
 
     # Reset shared mocks used by headless.py tests
-    for mod_name in ("linuxcnc", "_hal"):
+    for mod_name in ("linuxcnc", "hal"):
         if mod_name in sys.modules:
             mod = sys.modules[mod_name]
             if hasattr(mod, "reset_mock"):
@@ -239,5 +242,5 @@ def linuxcnc_module():
 
 @pytest.fixture
 def hal_module():
-    """Provide the mock _hal module."""
+    """Provide the mock hal module."""
     return _make_mock_hal()
