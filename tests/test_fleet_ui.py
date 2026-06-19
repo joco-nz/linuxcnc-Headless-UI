@@ -61,6 +61,11 @@ class MockFleetClient:
         self.feed_hold_calls: list = []
         self.continue_exec_calls: list = []
         self.home_all_calls: list = []
+        self.estop_reset_calls: list = []
+        self.power_on_calls: list = []
+        self.power_off_calls: list = []
+        self.set_machine_state_calls: list = []
+        self.init_machine_calls: list = []
         self.subscribe_status_calls: list = []
         self.subscribe_all_status_calls: list = []
         self.close_calls: int = 0
@@ -150,6 +155,15 @@ class MockFleetClient:
     async def home_all(self, machine_id):
         self.home_all_calls.append(machine_id)
         return Result(success=True, message="Homed all axes")
+
+    async def set_machine_state(self, machine_id, state):
+        self.set_machine_state_calls.append((machine_id, state))
+        labels = {1: "E-Stop Reset", 2: "Power Off", 3: "Power On"}
+        return Result(success=True, message=f"State set to {labels.get(state, state)}")
+
+    async def init_machine(self, machine_id):
+        self.init_machine_calls.append(machine_id)
+        return Result(success=True, message="Machine initialized")
 
     # ── HAL RPCs ─────────────────────────────────────────────────────
 
@@ -524,16 +538,52 @@ class TestFleetApp:
         assert result["success"] is False
         assert "Unknown control" in result["message"]
 
+    async def test_control_estop_reset_forwards_to_set_machine_state(self, fleet_app, mock_client):
+        result = await fleet_app.control("machine-1", "estop_reset")
+        assert result["success"] is True
+        assert ("machine-1", 1) in mock_client.set_machine_state_calls
+
+    async def test_control_power_on_forwards_to_set_machine_state(self, fleet_app, mock_client):
+        result = await fleet_app.control("machine-1", "power_on")
+        assert result["success"] is True
+        assert ("machine-1", 3) in mock_client.set_machine_state_calls
+
+    async def test_control_power_off_forwards_to_set_machine_state(self, fleet_app, mock_client):
+        result = await fleet_app.control("machine-1", "power_off")
+        assert result["success"] is True
+        assert ("machine-1", 2) in mock_client.set_machine_state_calls
+
+    async def test_set_machine_state_forwards_to_client(self, fleet_app, mock_client):
+        result = await fleet_app.set_machine_state("machine-1", 3)
+        assert result["success"] is True
+        assert ("machine-1", 3) in mock_client.set_machine_state_calls
+
+    async def test_init_machine_forwards_to_client(self, fleet_app, mock_client):
+        result = await fleet_app.init_machine("machine-1")
+        assert result["success"] is True
+        assert "machine-1" in mock_client.init_machine_calls
+
     async def test_stream_status_creates_and_registers_stream(self, fleet_app, mock_client):
         stream = await fleet_app.stream_status("machine-1")
         assert isinstance(stream, _SSEStream)
         assert stream.machine_id == "machine-1"
         assert "machine-1" in fleet_app._streams
+        assert stream in fleet_app._streams["machine-1"]
 
     async def test_remove_stream_cleans_up(self, fleet_app, mock_client):
-        await fleet_app.stream_status("machine-1")
+        stream = await fleet_app.stream_status("machine-1")
         assert "machine-1" in fleet_app._streams
+        await fleet_app.remove_stream("machine-1", stream)
+        assert "machine-1" not in fleet_app._streams
+
+    async def test_remove_stream_fallback_closes_all(self, fleet_app, mock_client):
+        """remove_stream without stream arg closes all and deletes entry."""
+        s1 = await fleet_app.stream_status("machine-1")
+        s2 = await fleet_app.stream_status("machine-1")
+        assert len(fleet_app._streams["machine-1"]) == 2
         await fleet_app.remove_stream("machine-1")
+        assert s1._done is True
+        assert s2._done is True
         assert "machine-1" not in fleet_app._streams
 
     async def test_stream_all_machines_creates_stream(self, fleet_app, mock_client):
@@ -543,10 +593,77 @@ class TestFleetApp:
         assert "__all__" in fleet_app._streams
 
     async def test_remove_all_stream_cleans_up(self, fleet_app, mock_client):
-        await fleet_app.stream_all_machines()
+        stream = await fleet_app.stream_all_machines()
         assert "__all__" in fleet_app._streams
-        await fleet_app.remove_all_stream()
+        await fleet_app.remove_stream("__all__", stream)
         assert "__all__" not in fleet_app._streams
+
+    async def test_multiple_streams_same_machine_independent(self, fleet_app, mock_client):
+        """Two tabs for the same machine create two independent streams."""
+        s1 = await fleet_app.stream_status("machine-1")
+        s2 = await fleet_app.stream_status("machine-1")
+        assert s1 is not s2
+        assert s1.stream_id != s2.stream_id
+        assert len(fleet_app._streams["machine-1"]) == 2
+
+    async def test_remove_stream_does_not_affect_other_tabs(self, fleet_app, mock_client):
+        """Removing one stream should not affect other streams for the same machine."""
+        s1 = await fleet_app.stream_status("machine-1")
+        s2 = await fleet_app.stream_status("machine-1")
+        assert len(fleet_app._streams["machine-1"]) == 2
+        await fleet_app.remove_stream("machine-1", s1)
+        assert "machine-1" in fleet_app._streams
+        assert len(fleet_app._streams["machine-1"]) == 1
+        assert s1._done is True
+        assert s2._done is False
+
+    async def test_stream_status_reconnects_on_error(self, fleet_app, mock_client):
+        """Stream should reconnect after gRPC error with exponential backoff."""
+        call_count = 0
+
+        async def failing_subscribe(machine_id):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise grpc.aio.AioRpcError(
+                    code=lambda: grpc.StatusCode.UNAVAILABLE,
+                    details=lambda: "connection refused",
+                    initial_metadata=None, trailing_metadata=None,
+                )
+            for i in range(2):
+                yield MachineStatus(machine_id=machine_id, state=3, execution=1, interp_state=3,
+                                    estop_state=1, mode=2, joint_actual=Position(x=float(i), y=0.0, z=0.0))
+                await asyncio.sleep(0.01)
+
+        original_subscribe = mock_client.subscribe_status
+        mock_client.subscribe_status = failing_subscribe
+
+        stream = await fleet_app.stream_status("machine-1")
+        assert "machine-1" in fleet_app._streams
+
+        await asyncio.sleep(2.5)  # Wait for retry after 2s backoff
+
+        stream.close()
+        await fleet_app.remove_stream("machine-1", stream)
+        await asyncio.sleep(0.2)
+
+        assert call_count == 2
+
+    async def test_stream_status_stops_retrying_when_closed(self, fleet_app, mock_client):
+        """Stream should stop reconnecting once client disconnects (stream closed)."""
+        error_count = 0
+
+        def always_fail(machine_id):
+            nonlocal error_count
+            error_count += 1
+
+            async def _gen():
+                raise grpc.aio.AioRpcError(
+                    code=lambda: grpc.StatusCode.UNAVAILABLE,
+                    details=lambda: "connection refused",
+                    initial_metadata=None, trailing_metadata=None,
+                )
+            return _gen()
 
     async def test_get_last_status_returns_cached(self, fleet_app, mock_client):
         await fleet_app.get_status("machine-1")
@@ -613,6 +730,7 @@ class TestFleetApp:
 
         # Close the stream while a retry is pending
         stream.close()
+        await fleet_app.remove_stream("machine-1", stream)
         await asyncio.sleep(1.5)  # Wait longer than first backoff (2s)
 
         assert error_count == 1
@@ -644,6 +762,7 @@ class TestFleetApp:
         await asyncio.sleep(2.5)  # Wait for retry after 2s backoff
 
         stream.close()
+        await fleet_app.remove_stream("__all__", stream)
         await asyncio.sleep(0.2)
 
         assert call_count == 2
@@ -652,20 +771,18 @@ class TestFleetApp:
         """StreamAll should stop reconnecting once client disconnects."""
         error_count = 0
 
-        def always_fail():
+        async def _always_fail():
             nonlocal error_count
             error_count += 1
-
-            async def _gen():
-                raise grpc.aio.AioRpcError(
-                    code=lambda: grpc.StatusCode.UNAVAILABLE,
-                    details=lambda: "connection refused",
-                    initial_metadata=None, trailing_metadata=None,
-                )
-            return _gen()
+            raise grpc.aio.AioRpcError(
+                code=lambda: grpc.StatusCode.UNAVAILABLE,
+                details=lambda: "connection refused",
+                initial_metadata=None, trailing_metadata=None,
+            )
+            yield  # Make this an async generator
 
         original_subscribe = mock_client.subscribe_all_status
-        mock_client.subscribe_all_status = always_fail
+        mock_client.subscribe_all_status = _always_fail
 
         stream = await fleet_app.stream_all_machines()
         await asyncio.sleep(0.1)

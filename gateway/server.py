@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue
 import threading
 import time
 from concurrent import futures
 from typing import Any, AsyncGenerator, Generator, Optional
+
+from aiohttp import web as aiohttp_web
 
 import grpc
 
@@ -264,7 +267,7 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
     ) -> GatewayRoute:
         """Route a machine ID to its address:port."""
         user = self._get_user(context)
-        machine_id = request.id if hasattr(request, 'id') else str(request)
+        machine_id = request.id
 
         # Check control access (routing requires at least read + route permission)
         result = self._check_read_access(user, machine_id)
@@ -287,9 +290,10 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
         user = self._get_user(context)
 
         # Resolve target machines based on scope
-        scope_value = request.scope  # proto3 enum stored as int
-        scope_names = {0: "ALL", 1: "FACILITY", 2: "TAG"}
-        scope_str = scope_names.get(scope_value, "ALL")
+        try:
+            scope_str = BroadcastRequest.Scope.Name(request.scope)
+        except ValueError:
+            scope_str = "ALL"
         facility_val = request.facility if request.facility else None
         targets = self.registry.resolve_scope(
             scope_str,
@@ -423,8 +427,6 @@ class GatewayServiceServicer(FleetGatewayServiceServicer):
                 clients.append((target.id, client))
 
         # Stream status from each machine using separate threads
-        import queue
-
         _MAX_QUEUE_SIZE = 100
 
         streams: dict[str, queue.Queue] = {mid: queue.Queue(maxsize=_MAX_QUEUE_SIZE) for mid, _ in clients}
@@ -708,40 +710,39 @@ def run_gateway_server(
             nonlocal http_runner
             from gateway import metrics as gateway_metrics
 
-            runner = aiohttp.web.AppRunner(aiohttp.web.Application())
-            runner.app["token_servicer"] = token_servicer
-            runner.app["registry"] = registry
+            app = aiohttp_web.Application()
+            app["token_servicer"] = token_servicer
+            app["registry"] = registry
 
-            @runner.app.on_startup.register
-            async def _startup(app):
-                site = aiohttp.web.TCPSite(runner, "0.0.0.0", http_port)
-                await site.start()
-                app["http_site"] = site
-                log.info("HTTP token server started on port %d", http_port)
+            async def handle_health(request: aiohttp_web.Request) -> aiohttp_web.Response:
+                data = gateway_metrics.handle_health(registry, tls_enabled=tls_enabled, grpc_port=port)
+                return aiohttp_web.json_response(data)
 
-            @runner.app.on_shutdown.register
-            async def _shutdown(app):
-                site = app.get("http_site")
-                if site:
-                    await site.stop()
-                log.info("HTTP token server stopped")
+            async def handle_config(request: aiohttp_web.Request) -> aiohttp_web.Response:
+                data = {
+                    "tls_enabled": tls_enabled,
+                    "grpc_port": port,
+                }
+                return aiohttp_web.json_response(data)
 
-            async def handle_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
-                data = gateway_metrics.handle_health(registry)
-                return aiohttp.web.json_response(data)
-
-            async def handle_metrics(request: aiohttp.web.Request) -> aiohttp.web.Response:
+            async def handle_metrics(request: aiohttp_web.Request) -> aiohttp_web.Response:
                 text = gateway_metrics.handle_metrics()
-                return aiohttp.web.Response(text=text, content_type="text/plain; version=0.0.4", charset="utf-8")
+                return aiohttp_web.Response(text=text, content_type="text/plain; version=0.0.4", charset="utf-8")
 
-            runner.app.router.add_get("/health", handle_health)
-            runner.app.router.add_get("/metrics", handle_metrics)
-            runner.app.router.add_post(
+            app.router.add_get("/health", handle_health)
+            app.router.add_get("/metrics", handle_metrics)
+            app.router.add_get("/api/config", handle_config)
+            app.router.add_post(
                 "/api/auth/token",
-                _handle_auth_token_wrapper(token_servicer),
+                _handle_auth_token,
             )
+
+            runner = aiohttp_web.AppRunner(app)
             await runner.setup()
+            site = aiohttp_web.TCPSite(runner, "0.0.0.0", http_port)
+            await site.start()
             http_runner = runner
+            log.info("HTTP token server started on port %d", http_port)
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -780,10 +781,8 @@ def run_gateway_server(
 # ── HTTP Token Issuance Server ────────────────────────────────────────────────
 
 
-async def _handle_auth_token(request: "web.Request") -> "web.Response":
+async def _handle_auth_token(request: "aiohttp_web.Request") -> "aiohttp_web.Response":
     """Handle POST /api/auth/token requests."""
-    import aiohttp
-
     servicer: TokenIssuanceServicer = request.app["token_servicer"]
     client_ip = request.remote or "0.0.0.0"
 
@@ -793,9 +792,9 @@ async def _handle_auth_token(request: "web.Request") -> "web.Response":
 
     try:
         result = servicer.issue_token(role=role, sub=sub, client_ip=client_ip)
-        return aiohttp.web.json_response(result)
+        return aiohttp_web.json_response(result)
     except TokenValidationError as e:
-        return aiohttp.web.json_response(
+        return aiohttp_web.json_response(
             {"error": str(e), "error_code": e.error_code}, status=e.error_code
         )
 

@@ -29,10 +29,11 @@ _DEFAULT_GATEWAY = os.environ.get("FLEET_UI_GATEWAY", "localhost:50052")
 class _SSEStream:
     """Manages a single SSE client connection."""
 
-    def __init__(self, request: web.Request | None, machine_id: str = "", timeout: float = 120.0) -> None:
+    def __init__(self, request: web.Request | None, machine_id: str = "", timeout: float = 120.0, stream_id: int | None = None) -> None:
         self._request = request
         self.machine_id = machine_id
         self._timeout = timeout
+        self.stream_id = stream_id if stream_id is not None else id(self)
         self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
         self._done = False
 
@@ -77,7 +78,7 @@ class FleetApp:
         self._gateway_http_port = gateway_http_port
         self._client: Optional[FleetClient] = None
         self._machines: list[MachineEntry] = []
-        self._streams: dict[str, _SSEStream] = {}  # machine_id -> stream
+        self._streams: dict[str, set[_SSEStream]] = {}  # machine_id -> set of streams (fan-out)
         self._last_status: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._proactive_task: asyncio.Task | None = None
@@ -183,7 +184,7 @@ class FleetApp:
             await self.init()
         return self._client
 
-    async def _grpc_call_with_retry(self, operation, fallback=None):
+    async def _grpc_call_with_retry(self, operation):
         """Execute a gRPC call with UNAUTHENTICATED retry logic."""
         try:
             return await operation()
@@ -299,8 +300,37 @@ class FleetApp:
                 result = await self._grpc_call_with_retry(lambda: client.continue_exec(machine_id))
             elif cmd == "home_all":
                 result = await self._grpc_call_with_retry(lambda: client.home_all(machine_id))
+            elif cmd == "estop_reset":
+                result = await self._grpc_call_with_retry(
+                    lambda: client.set_machine_state(machine_id, 1))
+            elif cmd == "power_on":
+                result = await self._grpc_call_with_retry(
+                    lambda: client.set_machine_state(machine_id, 3))
+            elif cmd == "power_off":
+                result = await self._grpc_call_with_retry(
+                    lambda: client.set_machine_state(machine_id, 2))
             else:
                 return {"success": False, "message": f"Unknown control: {cmd}"}
+            return {"success": result.success, "message": result.message}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    async def set_machine_state(self, machine_id: str, state: int) -> dict:
+        """Set machine control state (estop_reset, power on/off)."""
+        client = await self._ensure_client()
+        try:
+            result = await self._grpc_call_with_retry(
+                lambda: client.set_machine_state(machine_id, state))
+            return {"success": result.success, "message": result.message}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    async def init_machine(self, machine_id: str) -> dict:
+        """Initialize machine: estop_reset + power_on + mode_manual."""
+        client = await self._ensure_client()
+        try:
+            result = await self._grpc_call_with_retry(
+                lambda: client.init_machine(machine_id))
             return {"success": result.success, "message": result.message}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -391,27 +421,31 @@ class FleetApp:
             max_retries = 5
             for attempt in range(max_retries + 1):
                 try:
-                    stream_ref = None
+                    all_done = False
                     async with self._lock:
-                        stream_ref = self._streams.get(machine_id)
-                    if stream_ref is not None and stream_ref._done:
-                        return
+                        if not self._streams.get(machine_id):
+                            return
+                        # Check if all streams are done (no active subscribers)
+                        remaining = {s for s in self._streams[machine_id] if not s._done}
+                        if not remaining:
+                            del self._streams[machine_id]
+                            return
                     async for status in client.subscribe_status(machine_id):
                         data = _status_to_dict(status)
-                        stream = None
                         async with self._lock:
                             self._last_status[machine_id] = data
-                            stream = self._streams.get(machine_id)
-                        if stream is not None:
+                            streams = list(self._streams.get(machine_id, set()))
+                        if not streams:
+                            return
+                        for stream in streams:
                             await stream.send(data)
-                            if stream._done:
-                                return
                 except Exception as e:
                     log.error("Stream %s error (attempt %d/%d): %s", machine_id, attempt + 1, max_retries + 1, e)
-                    stream = None
                     async with self._lock:
-                        stream = self._streams.get(machine_id)
-                    if stream is not None and not stream._done:
+                        remaining = {s for s in self._streams.get(machine_id, set()) if not s._done}
+                        if not remaining and machine_id in self._streams:
+                            del self._streams[machine_id]
+                    if remaining:
                         wait = min(2 ** attempt, 30)
                         log.info("Reconnecting to %s in %ds...", machine_id, wait)
                         await asyncio.sleep(wait)
@@ -422,15 +456,25 @@ class FleetApp:
 
         stream = _SSEStream(None, machine_id=machine_id, timeout=self._timeout)
         async with self._lock:
-            self._streams[machine_id] = stream
+            if machine_id not in self._streams:
+                self._streams[machine_id] = set()
+            self._streams[machine_id].add(stream)
 
         asyncio.create_task(_stream_loop())
         return stream
 
-    async def remove_stream(self, machine_id: str) -> None:
+    async def remove_stream(self, machine_id: str, stream: _SSEStream | None = None) -> None:
         async with self._lock:
-            if machine_id in self._streams:
-                self._streams[machine_id].close()
+            if machine_id not in self._streams:
+                return
+            if stream is not None:
+                stream.close()
+                self._streams[machine_id].discard(stream)
+                if not self._streams[machine_id]:
+                    del self._streams[machine_id]
+            else:
+                for s in self._streams[machine_id]:
+                    s.close()
                 del self._streams[machine_id]
 
     async def stream_all_machines(self) -> _SSEStream:
@@ -445,27 +489,30 @@ class FleetApp:
             max_retries = 5
             for attempt in range(max_retries + 1):
                 try:
-                    stream_ref = None
                     async with self._lock:
-                        stream_ref = self._streams.get("__all__")
-                    if stream_ref is not None and stream_ref._done:
-                        return
+                        if not self._streams.get("__all__"):
+                            return
+                        # Check if all streams are done (no active subscribers)
+                        remaining = {s for s in self._streams["__all__"] if not s._done}
+                        if not remaining:
+                            del self._streams["__all__"]
+                            return
                     async for machine_id, status in client.subscribe_all_status():
                         data = _status_to_dict(status)
-                        stream = None
                         async with self._lock:
                             self._last_status[machine_id] = data
-                            stream = self._streams.get("__all__")
-                        if stream is not None:
+                            streams = list(self._streams.get("__all__", set()))
+                        if not streams:
+                            return
+                        for stream in streams:
                             await stream.send(data)
-                            if stream._done:
-                                return
                 except Exception as e:
                     log.error("StreamAll error (attempt %d/%d): %s", attempt + 1, max_retries + 1, e)
-                    stream = None
                     async with self._lock:
-                        stream = self._streams.get("__all__")
-                    if stream is not None and not stream._done:
+                        remaining = {s for s in self._streams.get("__all__", set()) if not s._done}
+                        if not remaining and "__all__" in self._streams:
+                            del self._streams["__all__"]
+                    if remaining:
                         wait = min(2 ** attempt, 30)
                         log.info("Reconnecting in %ds...", wait)
                         await asyncio.sleep(wait)
@@ -476,7 +523,9 @@ class FleetApp:
 
         stream = _SSEStream(None, machine_id="__all__", timeout=self._timeout)
         async with self._lock:
-            self._streams["__all__"] = stream
+            if "__all__" not in self._streams:
+                self._streams["__all__"] = set()
+            self._streams["__all__"].add(stream)
 
         asyncio.create_task(_stream_loop())
         return stream
@@ -484,7 +533,8 @@ class FleetApp:
     async def remove_all_stream(self) -> None:
         async with self._lock:
             if "__all__" in self._streams:
-                self._streams["__all__"].close()
+                for s in self._streams["__all__"]:
+                    s.close()
                 del self._streams["__all__"]
 
     async def get_last_status(self, machine_id: str) -> Optional[dict]:
@@ -1087,14 +1137,18 @@ main {
             </div>
           </div>
           <div class="control-group">
-            <h3>Program Load</h3>
-            <div class="mdi-input-row">
-              <input id="program-path" type="text" placeholder="/path/to/file.ngc" onkeydown="if(event.key==='Enter')loadProgram()">
-              <button class="btn" onclick="loadProgram()">Load</button>
-            </div>
-          </div>
-          <div class="control-group">
-            <h3>Motion Controls</h3>
+             <h3>Program Load</h3>
+             <div class="mdi-input-row">
+               <input id="program-path" type="text" placeholder="/path/to/file.ngc" onkeydown="if(event.key==='Enter')loadProgram()">
+               <button class="btn" onclick="loadProgram()">Load</button>
+             </div>
+           </div>
+           <div class="control-group">
+             <h3>Machine State</h3>
+             <div class="control-buttons" id="state-buttons"></div>
+           </div>
+           <div class="control-group">
+             <h3>Motion Controls</h3>
             <div class="control-buttons" id="motion-buttons"></div>
           </div>
           <div class="control-group">
@@ -1467,6 +1521,14 @@ function buildControls() {
     `<button class="btn" onclick="setMode('${m}')">${m}</button>`
   ).join('');
 
+  const stateBtns = document.getElementById('state-buttons');
+  stateBtns.innerHTML = `
+    <button class="btn primary" onclick="doMachineState('estop_reset')">⏻ E-Stop Reset</button>
+    <button class="btn" onclick="doMachineState('power_on')">⚡ Power On</button>
+    <button class="btn danger" onclick="doMachineState('power_off')">⏻ Power Off</button>
+    <button class="btn" onclick="doInitMachine()">🔄 Init Machine</button>
+  `;
+
   const motionBtns = document.getElementById('motion-buttons');
   motionBtns.innerHTML = `
     <button class="btn primary" onclick="doControl('start')">▶ Start</button>
@@ -1642,6 +1704,36 @@ async function doControl(cmd) {
   if (!selectedMachine) return;
   try {
     const resp = await fetch(`/api/control/${selectedMachine}/${cmd}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const result = await resp.json();
+    showToast(result.message, result.success ? 'success' : 'error');
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+}
+
+async function doMachineState(cmd) {
+  if (!selectedMachine) return;
+  try {
+    const resp = await fetch(`/api/control/${selectedMachine}/${cmd}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const result = await resp.json();
+    showToast(result.message, result.success ? 'success' : 'error');
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+}
+
+async function doInitMachine() {
+  if (!selectedMachine) return;
+  try {
+    const resp = await fetch(`/api/init-machine/${selectedMachine}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -1846,7 +1938,7 @@ async def handle_stream(request: web.Request) -> web.Response:
         except Exception as e:
             log.debug("Stream client disconnected: %s", e)
         finally:
-            await app_state.remove_stream(machine_id)
+            await app_state.remove_stream(machine_id, stream)
 
     origin = request.headers.get('Origin')
     cors_headers = {}
@@ -1894,7 +1986,9 @@ async def handle_stream_all(request: web.Request) -> web.Response:
         except Exception as e:
             log.debug("StreamAll client disconnected: %s", e)
         finally:
-            await app_state.remove_all_stream()
+            await app_state.remove_stream("__all__", stream)
+
+    origin = request.headers.get('Origin')
 
     origin = request.headers.get('Origin')
     cors_headers = {}
@@ -2008,6 +2102,14 @@ async def handle_control(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def handle_init_machine(request: web.Request) -> web.Response:
+    """Initialize machine (estop_reset + power_on + mode_manual)."""
+    app_state = request.app['fleet']
+    machine_id = request.match_info['id']
+    result = await app_state.init_machine(machine_id)
+    return web.json_response(result)
+
+
 async def handle_hal_list(request: web.Request) -> web.Response:
     """List HAL components and pins."""
     app_state = request.app['fleet']
@@ -2096,6 +2198,7 @@ def create_routes(app: web.Application) -> None:
     app.router.add_post('/api/programs/broadcast', handle_program_broadcast)
     app.router.add_get('/api/programs/{id}', handle_list_programs)
     app.router.add_post('/api/control/{id}/{cmd}', handle_control)
+    app.router.add_post('/api/init-machine/{id}', handle_init_machine)
     app.router.add_get('/api/hal/{id}', handle_hal_list)
     app.router.add_get('/api/hal/pin/{id}/{pin}', handle_hal_pin)
     app.router.add_post('/api/hal/write/{id}/{pin}', handle_hal_write)
@@ -2123,10 +2226,12 @@ def parse_args() -> argparse.Namespace:
 async def on_startup(app: web.Application) -> None:
     """Initialize FleetClient on server start."""
     args = app['args']
+    import os as _os
+
     fleet_app = FleetApp(
         gateway_address=args.gateway,
         token=args.token or '',
-        tls_enabled=bool(args.tls_cert),
+        tls_enabled=args.tls_cert is not None and _os.path.isfile(args.tls_cert),
         timeout=float(args.timeout),
         gateway_http_port=args.http_port if hasattr(args, 'http_port') else None,
     )

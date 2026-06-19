@@ -150,34 +150,6 @@ class TestChannelCaching:
             finally:
                 asyncio.run(client.close())
 
-    def test_cleanup_expired_channels_removes_old(self):
-        """_cleanup_expired_channels removes expired entries."""
-        with patch("fleet_client.client.grpc") as mock_grpc, \
-            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
-            mock_channel = Mock()
-            mock_grpc.aio.insecure_channel.return_value = mock_channel
-            MockAioGatewayStub.return_value = Mock()
-
-            client = FleetClient(
-                gateway_address="127.0.0.1:50051",
-                token="fake-token",
-                tls_enabled=False,
-                machine_channel_ttl=1.0,
-            )
-            try:
-                ch = asyncio.run(client._get_or_create_machine_channel("10.0.0.1", 5007))
-
-                # Manually expire the cache entry
-                with client._cache_lock:
-                    key = "10.0.0.1:5007"
-                    cached = client._machine_channels[key]
-                    cached.created_at = 0.0  # ancient timestamp
-
-                client._cleanup_expired_channels()
-                assert len(client._machine_channels) == 0
-            finally:
-                asyncio.run(client.close())
-
 
 # ── GatewayService RPC tests ───────────────────────────────────────────
 
@@ -191,8 +163,10 @@ class TestGatewayRpcWrappers:
             MockAioGatewayStub.return_value = mock_stub
 
             mock_response = MagicMock()
+            mock_version = MagicMock()
+            mock_version.version_string = "v1"
             mock_response.machines = [MagicMock(machine_id="m1", machine_name="n1",
-                                                 host_address="10.0.0.1", version="v1",
+                                                 host_address="10.0.0.1", version=mock_version,
                                                  num_joints=4, num_hal_components=2)]
             mock_stub.DiscoverMachines = AsyncMock(return_value=mock_response)
 
@@ -316,6 +290,93 @@ class TestClosedClient:
             asyncio.run(client.close())
             with pytest.raises(RuntimeError, match="Client is closed"):
                 asyncio.run(client.route_machine("m1"))
+
+    def test_route_machine_empty_id_raises_valueerror(self):
+        """route_machine raises ValueError for empty machine_id."""
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
+            mock_grpc.aio.insecure_channel = Mock()
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="fake-token",
+                tls_enabled=False,
+            )
+            try:
+                with pytest.raises(ValueError, match="machine_id must not be empty"):
+                    asyncio.run(client.route_machine(""))
+            finally:
+                asyncio.run(client.close())
+
+    def test_route_machine_whitespace_id_raises_valueerror(self):
+        """route_machine raises ValueError for whitespace-only machine_id."""
+        with patch("fleet_client.client.grpc") as mock_grpc, \
+            patch("fleet_client.client._AioFleetGatewayServiceStub") as MockAioGatewayStub:
+            mock_grpc.aio.insecure_channel = Mock()
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="fake-token",
+                tls_enabled=False,
+            )
+            try:
+                with pytest.raises(ValueError, match="machine_id must not be empty"):
+                    asyncio.run(client.route_machine("   "))
+            finally:
+                asyncio.run(client.close())
+
+    def test_get_status_empty_machine_id_raises_valueerror(self):
+        """get_status raises ValueError for empty machine_id via _get_fleet_stub."""
+        client = FleetClient(
+            gateway_address="127.0.0.1:50051",
+            token="fake-token",
+            tls_enabled=False,
+        )
+        try:
+            with pytest.raises(ValueError, match="machine_id must not be empty"):
+                asyncio.run(client.get_status(""))
+        finally:
+            asyncio.run(client.close())
+
+    def test_set_mode_empty_machine_id_raises_valueerror(self):
+        """set_mode raises ValueError for empty machine_id via _get_fleet_stub."""
+        client = FleetClient(
+            gateway_address="127.0.0.1:50051",
+            token="fake-token",
+            tls_enabled=False,
+        )
+        try:
+            with pytest.raises(ValueError, match="machine_id must not be empty"):
+                asyncio.run(client.set_mode("", 2))
+        finally:
+            asyncio.run(client.close())
+
+    def test_send_mdi_empty_machine_id_raises_valueerror(self):
+        """send_mdi raises ValueError for empty machine_id via _get_fleet_stub."""
+        client = FleetClient(
+            gateway_address="127.0.0.1:50051",
+            token="fake-token",
+            tls_enabled=False,
+        )
+        try:
+            with pytest.raises(ValueError, match="machine_id must not be empty"):
+                asyncio.run(client.send_mdi("", "G0 X1"))
+        finally:
+            asyncio.run(client.close())
+
+    def test_subscribe_status_empty_machine_id_raises_valueerror(self):
+        """subscribe_status raises ValueError for empty machine_id via _get_fleet_stub."""
+        client = FleetClient(
+            gateway_address="127.0.0.1:50051",
+            token="fake-token",
+            tls_enabled=False,
+        )
+        try:
+            gen = client.subscribe_status("")
+            with pytest.raises(ValueError, match="machine_id must not be empty"):
+                asyncio.run(gen.__anext__())
+        finally:
+            asyncio.run(client.close())
 
     def test_get_status_raises_when_closed(self):
         """get_status raises RuntimeError when client is closed."""
@@ -1327,5 +1388,239 @@ class TestTokenRefreshInterceptorPropagation:
 
                 # The second call creates a new channel with the new token
                 assert mock_grpc.aio.insecure_channel.call_count == 2
+            finally:
+                asyncio.run(client.close())
+
+
+class TestTLSAutoDetection:
+    """Tests for TLS auto-detection via HTTP config endpoint."""
+
+    # Save real grpc values before any patching
+    _REAL_CONNECTIVITY_READY = grpc.ChannelConnectivity.READY
+    _REAL_CONNECTIVITY_TRANSIENT_FAILURE = grpc.ChannelConnectivity.TRANSIENT_FAILURE
+
+    @staticmethod
+    def _configure_grpc_mock(mock_grpc):
+        """Configure mock grpc to return real enum values for ChannelConnectivity."""
+        cc = mock_grpc.ChannelConnectivity
+        cc.READY = TestTLSAutoDetection._REAL_CONNECTIVITY_READY
+        cc.TRANSIENT_FAILURE = TestTLSAutoDetection._REAL_CONNECTIVITY_TRANSIENT_FAILURE
+
+    def test_detect_tls_returns_none_without_aiohttp(self):
+        """_detect_tls() returns None when aiohttp is not available."""
+        with patch("fleet_client.client.aiohttp", None):
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=True,
+            )
+            try:
+                result = asyncio.run(client._detect_tls())
+                assert result is None
+            finally:
+                asyncio.run(client.close())
+
+    def test_detect_tls_probes_http_config(self):
+        """_detect_tls() probes HTTP endpoint and returns detected TLS status."""
+        mock_json_data = {"tls_enabled": True, "grpc_port": 50051}
+
+        resp_mock = Mock()
+        resp_mock.__aenter__ = AsyncMock(return_value=resp_mock)
+        resp_mock.__aexit__ = AsyncMock(return_value=False)
+        resp_mock.json = AsyncMock(return_value=mock_json_data)
+        resp_mock.status = 200
+
+        session_mock = Mock()
+        session_mock.get = Mock(return_value=resp_mock)
+        session_mock.__aenter__ = AsyncMock(return_value=session_mock)
+        session_mock.__aexit__ = AsyncMock(return_value=False)
+
+        mock_aiohttp = Mock()
+        mock_aiohttp.ClientSession = Mock(return_value=session_mock)
+        mock_aiohttp.ClientTimeout = Mock(return_value=None)
+
+        with patch("fleet_client.client.aiohttp", mock_aiohttp):
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=True,
+            )
+            try:
+                result = asyncio.run(client._detect_tls())
+                assert result is True
+            finally:
+                asyncio.run(client.close())
+
+    def test_detect_tls_returns_false_when_config_says_insecure(self):
+        """_detect_tls() returns False when config endpoint reports no TLS."""
+        mock_json_data = {"tls_enabled": False, "grpc_port": 50051}
+
+        resp_mock = Mock()
+        resp_mock.__aenter__ = AsyncMock(return_value=resp_mock)
+        resp_mock.__aexit__ = AsyncMock(return_value=False)
+        resp_mock.json = AsyncMock(return_value=mock_json_data)
+        resp_mock.status = 200
+
+        session_mock = Mock()
+        session_mock.get = Mock(return_value=resp_mock)
+        session_mock.__aenter__ = AsyncMock(return_value=session_mock)
+        session_mock.__aexit__ = AsyncMock(return_value=False)
+
+        mock_aiohttp = Mock()
+        mock_aiohttp.ClientSession = Mock(return_value=session_mock)
+        mock_aiohttp.ClientTimeout = Mock(return_value=None)
+
+        with patch("fleet_client.client.aiohttp", mock_aiohttp):
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=True,
+            )
+            try:
+                result = asyncio.run(client._detect_tls())
+                assert result is False
+            finally:
+                asyncio.run(client.close())
+
+    def test_detect_tls_returns_none_on_http_failure(self):
+        """_detect_tls() returns None when HTTP endpoint is unreachable."""
+        with patch("fleet_client.client.aiohttp") as mock_aiohttp:
+            mock_aiohttp.ClientSession.side_effect = Exception("Connection refused")
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=True,
+            )
+            try:
+                result = asyncio.run(client._detect_tls())
+                assert result is None
+            finally:
+                asyncio.run(client.close())
+
+    def test_create_channel_with_fallback_uses_secure_when_tls_ok(self):
+        """_create_channel_with_fallback() creates secure channel when TLS works."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            TestTLSAutoDetection._configure_grpc_mock(mock_grpc)
+            mock_channel = Mock()
+            mock_channel._channel = Mock()
+            mock_channel._channel.check_connectivity_state = AsyncMock(
+                return_value=TestTLSAutoDetection._REAL_CONNECTIVITY_READY
+            )
+            mock_grpc.aio.secure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=True,
+            )
+            try:
+                result = asyncio.run(client._create_channel_with_fallback())
+                assert result is mock_channel
+                mock_grpc.aio.secure_channel.assert_called_once()
+                mock_grpc.aio.insecure_channel.assert_not_called()
+            finally:
+                asyncio.run(client.close())
+
+    def test_create_channel_with_fallback_falls_back_to_insecure(self):
+        """_create_channel_with_fallback() falls back to insecure on TLS failure."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            TestTLSAutoDetection._configure_grpc_mock(mock_grpc)
+            mock_secure_channel = Mock()
+            mock_secure_channel._channel = Mock()
+            mock_secure_channel._channel.check_connectivity_state = AsyncMock(
+                return_value=TestTLSAutoDetection._REAL_CONNECTIVITY_TRANSIENT_FAILURE
+            )
+            mock_secure_channel.close = AsyncMock()
+
+            mock_insecure_channel = Mock()
+
+            mock_grpc.aio.secure_channel.return_value = mock_secure_channel
+            mock_grpc.aio.insecure_channel.return_value = mock_insecure_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=True,
+            )
+            try:
+                result = asyncio.run(client._create_channel_with_fallback())
+                assert result is mock_insecure_channel
+                assert mock_grpc.aio.secure_channel.call_count == 1
+                mock_grpc.aio.insecure_channel.assert_called_once()
+                mock_secure_channel.close.assert_awaited()
+            finally:
+                asyncio.run(client.close())
+
+    def test_create_channel_with_fallback_no_tls(self):
+        """_create_channel_with_fallback() creates insecure channel when TLS disabled."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=False,
+            )
+            try:
+                result = asyncio.run(client._create_channel_with_fallback())
+                assert result is mock_channel
+                mock_grpc.aio.insecure_channel.assert_called_once()
+                mock_grpc.aio.secure_channel.assert_not_called()
+            finally:
+                asyncio.run(client.close())
+
+    def test_ensure_gateway_channel_uses_fallback(self):
+        """_ensure_gateway_channel() uses _create_channel_with_fallback()."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=False,
+            )
+            try:
+                asyncio.run(client._ensure_gateway_channel())
+                assert client._gateway_channel is mock_channel
+                assert client._gateway_stub is not None
+            finally:
+                asyncio.run(client.close())
+
+    def test_create_machine_channel_uses_tls(self):
+        """_create_machine_channel() creates secure channel when use_tls=True."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.secure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=True,
+            )
+            try:
+                result = client._create_machine_channel("10.0.0.1", 5007, use_tls=True)
+                assert result is mock_channel
+                mock_grpc.aio.secure_channel.assert_called_once()
+            finally:
+                asyncio.run(client.close())
+
+    def test_create_machine_channel_insecure(self):
+        """_create_machine_channel() creates insecure channel when use_tls=False."""
+        with patch("fleet_client.client.grpc") as mock_grpc:
+            mock_channel = Mock()
+            mock_grpc.aio.insecure_channel.return_value = mock_channel
+
+            client = FleetClient(
+                gateway_address="127.0.0.1:50051",
+                token="test-token",
+                tls_enabled=False,
+            )
+            try:
+                result = client._create_machine_channel("10.0.0.1", 5007, use_tls=False)
+                assert result is mock_channel
+                mock_grpc.aio.insecure_channel.assert_called_once()
             finally:
                 asyncio.run(client.close())

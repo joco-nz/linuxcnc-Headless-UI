@@ -28,7 +28,7 @@ gRPC-based headless fleet management for LinuxCNC machines. Monitor and control 
              │            │             │          │
           ┌──▼─────────┐ ┌▼──────────┐ ┌▼────────┐
           │  linuxcnc   │ │ linuxcnc  │ │ linuxcnc│
-          │  _hal       │ │  _hal     │ │  _hal   │
+          │  hal        │ │  hal      │ │  hal    │
           └─────────────┘ └───────────┘ └─────────┘
 ```
 
@@ -36,14 +36,14 @@ Three components, each installable independently:
 
 | Component | Package | Purpose |
 |-----------|---------|---------|
-| **Sidecar** | `linuxcnc-fleet[sidecar]` | Runs on each CNC machine. Wraps `linuxcnc` and `_hal` Python modules behind a gRPC server. |
+| **Sidecar** | `linuxcnc-fleet[sidecar]` | Runs on each CNC machine. Wraps `linuxcnc` and `hal` Python modules behind a gRPC server. |
 | **Gateway** | `linuxcnc-fleet[gateway]` | Central auth & routing service. OIDC token validation, RBAC policies, machine discovery, broadcast fan-out. |
 | **FleetClient** | `linuxcnc-fleet[client]` | Python client library with automatic OIDC auth injection, retry logic, channel caching, and streaming subscriptions. |
 
 ## Requirements
 
 - Python 3.10+
-- LinuxCNC installed with Python bindings (`linuxcnc`, `_hal` C extensions) — sidecar machines only
+- LinuxCNC installed with Python bindings (`linuxcnc`, `hal`) — sidecar machines only
 
 ## Installation
 

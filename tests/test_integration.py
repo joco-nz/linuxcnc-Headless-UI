@@ -352,18 +352,36 @@ class TestBroadcastCommand:
         token = _make_admin_token()
         metadata = [("authorization", f"Bearer {token}")]
 
+        # Broadcast mode change to ALL machines
+        broadcast_req = BroadcastRequest(
+            scope=BroadcastRequest.Scope.ALL,
+            mode=SetModeRequest(mode=Mode.MODE_AUTO),
+        )
+        resp = gateway_stub.BroadcastCommand(broadcast_req, metadata=metadata)
+
+        # Both registered machines should receive the command successfully
+        assert len(resp.results) == 2
+        assert "integration-machine-1" in resp.results
+        assert "integration-machine-2" in resp.results
+        assert resp.results["integration-machine-1"].success is True
+        assert resp.results["integration-machine-2"].success is True
+
+        # Wait for sidecar polling loop to pick up the mode change
+        import time as _time
+        _time.sleep(0.5)
+
+        # Route to machine-1 and verify mode actually changed
         route_resp = gateway_stub.RouteMachine(
             MachineId(id="integration-machine-1"),
             metadata=metadata,
         )
-
         sidecar_channel = grpc.insecure_channel(
             f"{route_resp.instance_address}:{route_resp.instance_port}"
         )
         sidecar_stub = FleetServiceStub(sidecar_channel)
 
-        status_before = sidecar_stub.GetStatus(MachineId(id="integration-machine-1"))
-        assert status_before.mode == Mode.MODE_MANUAL
+        status_after = sidecar_stub.GetStatus(MachineId(id="integration-machine-1"))
+        assert status_after.mode == Mode.MODE_AUTO
 
         sidecar_channel.close()
         gateway_channel.close()

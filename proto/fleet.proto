@@ -366,6 +366,13 @@ message MachineStateCommand {
   MachineControlState state = 2;
 }
 
+message InitMachineRequest {
+  MachineId id = 1;
+  bool reset_estop = 2;
+  bool power_on = 3;
+  bool set_mode = 4;
+}
+
 // Services
 
 service FleetService {
@@ -374,6 +381,7 @@ service FleetService {
  rpc SetMode(SetModeRequest) returns (Result);
   rpc SetExecution(ExecutionCommand) returns (Result);
   rpc SetMachineState(MachineStateCommand) returns (Result);
+  rpc InitMachine(InitMachineRequest) returns (Result);
    rpc Start(Empty) returns (Result);
   rpc Stop(Empty) returns (Result);
   rpc FeedHold(Empty) returns (Result);

@@ -207,25 +207,21 @@ def main(argv: Optional[list[str]] = None) -> None:
     allowed_subjects = [s.strip() for s in args.allowed_subjects.split(",") if s.strip()]
     allowed_ips = [ip.strip() for ip in args.allowed_ips.split(",") if ip.strip()]
 
-    try:
-        tls_enabled = args.cert is not None and args.key is not None
-        run_gateway_server(
-            auth_manager=auth_manager,
-            policy_engine=policy_engine,
-            registry=registry,
-            port=args.port,
-            tls_enabled=tls_enabled,
-            cert_file=args.cert,
-            key_file=args.key,
-            root_cert_file=args.root_cert,
-            http_port=args.http_port,
-            allowed_roles=allowed_roles,
-            allowed_subjects=allowed_subjects,
-            allowed_ips=allowed_ips,
-            token_ttl=args.token_ttl,
-            allow_admin_token=args.allow_admin_token,
-            permissive=args.permissive,
-        )
-    except KeyboardInterrupt:
-        log.info("Gateway server interrupted")
-        sys.exit(0)
+    tls_enabled = args.cert is not None and args.key is not None
+    run_gateway_server(
+        auth_manager=auth_manager,
+        policy_engine=policy_engine,
+        registry=registry,
+        port=args.port,
+        tls_enabled=tls_enabled,
+        cert_file=args.cert,
+        key_file=args.key,
+        root_cert_file=args.root_cert,
+        http_port=args.http_port,
+        allowed_roles=allowed_roles,
+        allowed_subjects=allowed_subjects,
+        allowed_ips=allowed_ips,
+        token_ttl=args.token_ttl,
+        allow_admin_token=args.allow_admin_token,
+        permissive=args.permissive,
+    )

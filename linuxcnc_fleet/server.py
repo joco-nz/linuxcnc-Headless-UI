@@ -30,6 +30,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     HalPinValue,
     HalPinWrite,
     HomeAxisRequest,
+    InitMachineRequest,
     IniParamRequest,
     IniParamValue,
     ListHalRequest,
@@ -175,6 +176,15 @@ class FleetServiceRPC(FleetServiceServicer):
         if not self._check_admin_access(request, context, "SetMachineState"):
             return Result(success=False, message="Access denied")
         return self.sidecar.set_machine_state(request.state)
+
+    def InitMachine(self, request: InitMachineRequest, context: grpc.ServicerContext) -> Result:
+        if not self._check_admin_access(request, context, "InitMachine"):
+            return Result(success=False, message="Access denied")
+        return self.sidecar.init_machine(
+            reset_estop=request.reset_estop,
+            power_on=request.power_on,
+            set_mode=request.set_mode,
+        )
 
     def Start(self, request: Empty, context: grpc.ServicerContext) -> Result:
         if not self._check_control_access(request, context, "Start"):

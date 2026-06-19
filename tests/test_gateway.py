@@ -240,6 +240,20 @@ class TestGatewayServiceServicer:
         assert result.instance_address == "192.168.1.10"
         assert result.instance_port == 5007
 
+    def test_route_machine_empty_id(self):
+        servicer = self.create_servicer()
+        registry = servicer.registry
+        registry.register("m1", "192.168.1.10", 5007, facility="shop-1")
+
+        token = create_test_token({"sub": "user1", "name": "User", "role": "viewer", "facility": "shop-1"})
+        context = MockServicerContext(self.make_metadata(token))
+
+        request = MachineId(id="")
+        with pytest.raises(grpc.RpcError) as exc_info:
+            servicer.RouteMachine(request, context)
+
+        assert "NOT_FOUND" in str(exc_info.value) or "PERMISSION_DENIED" in str(exc_info.value)
+
     # --- BroadcastCommand ---
 
     def test_broadcast_command_unauthenticated(self):

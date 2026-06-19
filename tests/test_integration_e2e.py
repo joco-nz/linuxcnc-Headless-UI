@@ -8,10 +8,7 @@ Tests FleetApp's complete token renewal flows with real gateway + sidecar:
 """
 
 import asyncio
-import socket
-import threading
 import time
-from concurrent import futures
 
 import aiohttp
 import grpc
@@ -21,124 +18,7 @@ from gateway.auth import create_test_auth_manager, create_test_token
 from gateway.policies import create_test_policy_engine
 from gateway.registry import create_test_registry
 
-
-# ---------------------------------------------------------------------------
-# Helpers: start full stack (sidecar + gateway with HTTP)
-# ---------------------------------------------------------------------------
-
-def _find_free_port():
-    """Find a free TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _start_sidecar(port):
-    """Start a sidecar server on the given port."""
-    from linuxcnc_fleet.headless import LinuxCncSidecar
-    from linuxcnc_fleet.server import create_server
-
-    sidecar = LinuxCncSidecar(
-        machine_id="e2e-machine-1",
-        ini_path="/fake.ini",
-    )
-    sidecar.run()
-
-    server = create_server(sidecar=sidecar, port=port)
-    server.start()
-    time.sleep(0.15)
-
-    def stop():
-        server.stop(grace=0.5)
-        sidecar.shutdown()
-
-    return sidecar, server, stop
-
-
-def _start_gateway_with_http(gw_port, http_port, auth_manager, policy_engine, registry,
-                              allowed_roles=None, allowed_subjects=None, allowed_ips=None,
-                              token_ttl=3, allow_admin_token=False, permissive=False):
-    """Start gateway gRPC + HTTP servers in background threads.
-
-    Returns (grpc_server, cleanup_fn) for cleanup.
-    """
-    from aiohttp import web as aiohttp_web
-    from gateway.server import TokenIssuanceServicer, GatewayServiceServicer
-    from linuxcnc_fleet.fleet_pb2_grpc import add_FleetGatewayServiceServicer_to_server
-
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    servicer = GatewayServiceServicer(auth_manager, policy_engine, registry)
-    add_FleetGatewayServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{gw_port}")
-
-    token_servicer = TokenIssuanceServicer(
-        auth_manager=auth_manager,
-        policy_engine=policy_engine,
-        allowed_roles=allowed_roles or ["viewer", "operator"],
-        allowed_subjects=allowed_subjects or ["fleet-ui"],
-        allowed_ips=allowed_ips or ["127.0.0.1", "::1"],
-        token_ttl=token_ttl,
-        allow_admin_token=allow_admin_token,
-        permissive=permissive,
-    )
-
-    http_app = aiohttp_web.Application()
-    http_app["token_servicer"] = token_servicer
-
-    async def _auth_token_handler(request):
-        servicer_instance: TokenIssuanceServicer = request.app["token_servicer"]
-        client_ip = request.remote or "0.0.0.0"
-        role = request.query.get("role", "viewer")
-        sub = request.query.get("sub", "fleet-ui")
-        try:
-            result = servicer_instance.issue_token(role=role, sub=sub, client_ip=client_ip)
-            return aiohttp_web.json_response(result)
-        except Exception as e:
-            error_code = getattr(e, "error_code", 403) if hasattr(e, "error_code") else 403
-            return aiohttp_web.json_response(
-                {"error": str(e), "error_code": error_code}, status=error_code
-            )
-
-    http_app.router.add_post("/api/auth/token", _auth_token_handler)
-
-    state = {"runner": None, "thread": None}
-
-    def _run_http():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        async def _async_start():
-            runner = aiohttp_web.AppRunner(http_app)
-            await runner.setup()
-            site = aiohttp_web.TCPSite(runner, "127.0.0.1", http_port)
-            await site.start()
-            state["runner"] = runner
-
-        loop.run_until_complete(_async_start())
-        state["thread"] = threading.Thread(target=loop.run_forever, daemon=True)
-        state["thread"].start()
-
-    http_thread = threading.Thread(target=_run_http, daemon=True)
-    http_thread.start()
-    time.sleep(0.25)
-
-    server.start()
-
-    def cleanup():
-        server.stop(grace=0.5)
-        runner = state.get("runner")
-        if runner:
-            try:
-                l = asyncio.new_event_loop()
-                l.run_until_complete(runner.cleanup())
-                l.close()
-            except Exception:
-                pass
-        thread = state.get("thread")
-        if thread:
-            thread.join(timeout=2)
-
-    return server, cleanup
+from conftest import _find_free_port, start_gateway_with_http
 
 
 # ---------------------------------------------------------------------------
@@ -148,8 +28,23 @@ def _start_gateway_with_http(gw_port, http_port, auth_manager, policy_engine, re
 @pytest.fixture()
 def e2e_sidecar():
     """Start a single sidecar for e2e tests."""
+    from linuxcnc_fleet.headless import LinuxCncSidecar
+    from linuxcnc_fleet.server import create_server
+
     port = _find_free_port()
-    sidecar, server, stop = _start_sidecar(port)
+    sidecar = LinuxCncSidecar(
+        machine_id="e2e-machine-1",
+        ini_path="/fake.ini",
+    )
+    sidecar.run()
+    server = create_server(sidecar=sidecar, port=port)
+    server.start()
+    time.sleep(0.15)
+
+    def stop():
+        server.stop(grace=0.5)
+        sidecar.shutdown()
+
     yield {"port": port, "sidecar": sidecar, "stop": stop}
 
 
@@ -177,7 +72,7 @@ def e2e_stack(e2e_sidecar):
     )
     registry.start()
 
-    grpc_server, cleanup = _start_gateway_with_http(
+    grpc_server, cleanup = start_gateway_with_http(
         gw_port=gw_port,
         http_port=http_port,
         auth_manager=auth_manager,
@@ -346,8 +241,8 @@ class TestFleetAppProactiveRenewal:
             machines1 = asyncio.run(app.discover_machines())
             assert len(machines1) >= 1, f"Expected >= 1 machine, got {len(machines1)}"
 
-            # Wait for token to expire (TTL=3s) + small margin
-            time.sleep(4)
+            # Wait for token to expire (TTL=3s) + safe margin
+            time.sleep(5)
 
             # Verify proactive refresh can fetch a new token from HTTP endpoint.
             # _fetch_token() always uses role=viewer (as FleetApp does in production),
@@ -471,8 +366,8 @@ class TestE2EActiveSession:
             machines1 = asyncio.run(app.discover_machines())
             assert len(machines1) >= 1, f"Initial discovery should succeed, got {len(machines1)}"
 
-            # Step 3: Wait for token to expire (TTL=3s)
-            time.sleep(4)
+            # Step 3: Wait for token to expire (TTL=3s) + safe margin
+            time.sleep(5)
 
             # Step 4: Reactive renewal — next call should auto-renew via HTTP
             # The expired admin token causes UNAUTHENTICATED, FleetApp fetches a new
@@ -527,8 +422,8 @@ class TestE2EActiveSession:
             machines1 = asyncio.run(app.discover_machines())
             assert len(machines1) >= 1
 
-            # Wait for token to expire (TTL=3s)
-            time.sleep(4)
+            # Wait for token to expire (TTL=3s) + safe margin
+            time.sleep(5)
 
             # Force reactive renewal by calling discover_machines
             # This triggers UNAUTHENTICATED → fetch new token via HTTP → retry

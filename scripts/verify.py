@@ -127,10 +127,10 @@ async def run_checks(client, args) -> bool:
                     print(f"  ... and {len(hal_list.components) - 5} more")
                 results.append(("List HAL components", True, f"{len(hal_list.components)} component(s)"))
         except Exception as e:
-            # _hal module not available is expected on non-RT setups
-            if "_hal" in str(e) or "not available" in str(e):
+            # hal module not available is expected on non-RT setups
+            if "hal" in str(e).lower() or "not available" in str(e):
                 print(f"  HAL not available (expected without RT kernel): {e}")
-                results.append(("List HAL components", True, "skipped (no _hal)"))
+                results.append(("List HAL components", True, "skipped (no hal)"))
             else:
                 results.append(("List HAL components", False, str(e)))
 

@@ -93,6 +93,11 @@ def _map_interp_state(interp: int) -> InterpState:
         return InterpState.PREDICT
     if interp == linuxcnc.INTERP_PAUSED:
         return InterpState.EXECUTE
+    # INTERP_ERROR — not exported by the Python linuxcnc module,
+    # but stat.interp_state can transiently reach this value during errors.
+    # Use getattr for forward compatibility if a future version exports it.
+    if interp == getattr(linuxcnc, "INTERP_ERROR", None):
+        return InterpState.ERROR
     return InterpState.INTERP_IDLE
 
 
@@ -863,6 +868,57 @@ class LinuxCncSidecar:
             return Result(success=True, message=f"Machine state set to {state}")
         except Exception as e:
             return Result(success=False, message=str(e), error_code=ErrorCode.INTERNAL_ERROR)
+
+    def init_machine(self, reset_estop: bool = True, power_on: bool = True,
+                     set_mode: bool = True) -> Result:
+        """Initialize machine: estop_reset -> power_on -> mode(MANUAL).
+
+        Args:
+            reset_estop: Clear E-stop state.
+            power_on: Enable machine power (set machine enabled).
+            set_mode: Switch to MANUAL mode.
+
+        Returns:
+            Result with success status and message listing completed steps.
+        """
+        steps_completed = []
+
+        if reset_estop:
+            r = self.set_machine_state(MachineControlState.STATE_ESTOP_RESET)
+            if not r.success:
+                return Result(
+                    success=False,
+                    message=f"E-Stop reset failed: {r.message}",
+                    error_code=ErrorCode.INTERNAL_ERROR,
+                )
+            steps_completed.append("estop_reset")
+            time.sleep(0.2)
+
+        if power_on:
+            r = self.set_machine_state(MachineControlState.STATE_ON)
+            if not r.success:
+                return Result(
+                    success=False,
+                    message=f"Power on failed: {r.message}",
+                    error_code=ErrorCode.INTERNAL_ERROR,
+                )
+            steps_completed.append("power_on")
+            time.sleep(0.2)
+
+        if set_mode:
+            r = self.set_mode(Mode.MODE_MANUAL)
+            if not r.success:
+                return Result(
+                    success=False,
+                    message=f"Mode change to MANUAL failed: {r.message}",
+                    error_code=ErrorCode.INTERNAL_ERROR,
+                )
+            steps_completed.append("mode_manual")
+
+        return Result(
+            success=True,
+            message=f"Machine initialized: {', '.join(steps_completed)}",
+        )
 
     def write_hal_pin(self, pin_name: str, value_f: float = 0.0,
                       value_u32: int = 0, value_s32: int = 0,

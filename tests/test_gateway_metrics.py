@@ -225,3 +225,116 @@ class TestHealthWithNoMachines:
         resp = await client.get("/health")
         data = await resp.json()
         assert data["machines_registered"] == 0
+
+
+class TestHealthWithTLS:
+    """Tests for health endpoint with TLS configuration."""
+
+    @pytest.mark.asyncio
+    async def test_health_with_tls_enabled(self):
+        """Health response includes tls_enabled=true when TLS is configured."""
+        from gateway import metrics as gateway_metrics
+
+        reg = MachineRegistry()
+        data = gateway_metrics.handle_health(reg, tls_enabled=True, grpc_port=50051)
+        assert data["tls_enabled"] is True
+        assert data["grpc_port"] == 50051
+
+    @pytest.mark.asyncio
+    async def test_health_with_tls_disabled(self):
+        """Health response does not include tls_enabled when TLS is off."""
+        from gateway import metrics as gateway_metrics
+
+        reg = MachineRegistry()
+        data = gateway_metrics.handle_health(reg, tls_enabled=False, grpc_port=50051)
+        assert "tls_enabled" not in data
+        assert data["grpc_port"] == 50051
+
+    @pytest.mark.asyncio
+    async def test_health_without_grpc_port(self):
+        """Health response omits grpc_port when not provided."""
+        from gateway import metrics as gateway_metrics
+
+        reg = MachineRegistry()
+        data = gateway_metrics.handle_health(reg, tls_enabled=False)
+        assert "grpc_port" not in data
+
+
+class TestConfigEndpoint:
+    """Tests for the /api/config endpoint."""
+
+    @pytest.fixture
+    def config_app(self):
+        """Create an aiohttp application with config route."""
+        from gateway import metrics as gateway_metrics
+
+        app = web.Application()
+        app["registry"] = MachineRegistry()
+
+        async def handle_health(request: web.Request) -> web.Response:
+            data = gateway_metrics.handle_health(
+                app["registry"], tls_enabled=True, grpc_port=50051
+            )
+            return web.json_response(data)
+
+        async def handle_config(request: web.Request) -> web.Response:
+            data = {"tls_enabled": True, "grpc_port": 50051}
+            return web.json_response(data)
+
+        app.router.add_get("/health", handle_health)
+        app.router.add_get("/api/config", handle_config)
+
+        return app
+
+    @pytest.fixture
+    async def config_client(self, config_app):
+        """Create a test client for the config application."""
+        async with TestClient(TestServer(config_app)) as client:
+            yield client
+
+    @pytest.mark.asyncio
+    async def test_config_returns_200(self, config_client):
+        """Config endpoint returns 200 OK."""
+        resp = await config_client.get("/api/config")
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_config_returns_json(self, config_client):
+        """Config endpoint returns JSON content type."""
+        resp = await config_client.get("/api/config")
+        assert resp.content_type == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_config_contains_tls_enabled(self, config_client):
+        """Config response includes tls_enabled field."""
+        resp = await config_client.get("/api/config")
+        data = await resp.json()
+        assert "tls_enabled" in data
+        assert data["tls_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_config_contains_grpc_port(self, config_client):
+        """Config response includes grpc_port field."""
+        resp = await config_client.get("/api/config")
+        data = await resp.json()
+        assert "grpc_port" in data
+        assert data["grpc_port"] == 50051
+
+    @pytest.mark.asyncio
+    async def test_config_tls_disabled(self):
+        """Config endpoint returns tls_enabled=false when TLS is off."""
+        from gateway import metrics as gateway_metrics
+
+        app = web.Application()
+        app["registry"] = MachineRegistry()
+
+        async def handle_config(request: web.Request) -> web.Response:
+            data = {"tls_enabled": False, "grpc_port": 50051}
+            return web.json_response(data)
+
+        app.router.add_get("/api/config", handle_config)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/config")
+            data = await resp.json()
+            assert data["tls_enabled"] is False

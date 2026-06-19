@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> None:
             machine_id=args.machine_id,
             poll_interval=args.poll_interval,
         )
-    except RuntimeError as e:
+    except Exception as e:
         logging.error("Failed to initialize sidecar: %s", e)
         sys.exit(1)
 

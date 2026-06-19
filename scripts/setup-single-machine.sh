@@ -59,7 +59,7 @@ if ! pip show linuxcnc-fleet &>/dev/null; then
 fi
 
 # Check that a LinuxCNC instance is actually running
-if ! pgrep -f "milltask|linuxcncsvr" >/dev/null 2>&1; then
+if ! pgrep -f "milltask|linuxcncsvr|/usr/bin/linuxcnc" >/dev/null 2>&1; then
     echo "ERROR: No running LinuxCNC instance found." >&2
     echo "       Start LinuxCNC first (e.g. 'linuxcnc /path/to/config.ini')." >&2
     exit 1
@@ -84,9 +84,11 @@ done
 echo "Starting gateway on :$GATEWAY_PORT ..."
 fleet-gateway \
     --port "$GATEWAY_PORT" \
+    --http-port 50053 \
     --jwt-secret "$JWT_SECRET" \
     --issuer "$JWT_ISSUER" \
     --audience "$JWT_AUDIENCE" \
+    --allow-admin-token \
     -v &
 GATEWAY_PID=$!
 echo "  Gateway PID: $GATEWAY_PID"
@@ -108,9 +110,21 @@ if [[ -n "$INI_PATH" ]]; then
     SIDECAR_ARGS+=(--ini "$INI_PATH")
     echo "  INI file: $INI_PATH"
    else
-        # Try to find INI via linuxcnc module
-        FOUND_INI=$(python3 -c "import linuxcnc; print(linuxcnc.find_file('ini') or '')" 2>/dev/null || true)
-        if [[ -n "$FOUND_INI" ]]; then
+        # Try to find INI via environment variable or common paths
+        FOUND_INI="${LINUXCNC_INI_FILE:-}"
+        if [[ -z "$FOUND_INI" ]]; then
+            # Check common LinuxCNC config locations
+            for candidate in \
+                "/home/james/linuxcnc/configs/sim.axis/axis_mm.ini" \
+                "/home/james/linuxcnc/configs/default.ini" \
+                "${HOME}/linuxcnc/configs/default.ini"; do
+                if [[ -f "$candidate" ]]; then
+                    FOUND_INI="$candidate"
+                    break
+                fi
+            done
+        fi
+        if [[ -n "$FOUND_INI" && -f "$FOUND_INI" ]]; then
             SIDECAR_ARGS+=(--ini "$FOUND_INI")
             echo "  INI file: $FOUND_INI (auto-detected)"
         else
@@ -163,7 +177,7 @@ echo "=============================================="
 echo " Servers are running!"
 echo "=============================================="
 echo ""
-echo "  Gateway:  localhost:$GATEWAY_PORT (PID $GATEWAY_PID)"
+echo "  Gateway:  localhost:$GATEWAY_PORT (gRPC), localhost:50053 (HTTP) (PID $GATEWAY_PID)"
 echo "  Sidecar:  localhost:$SIDECAR_PORT (PID $SIDECAR_PID)"
 echo ""
 echo " To verify connectivity, run:"

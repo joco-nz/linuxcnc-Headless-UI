@@ -182,22 +182,6 @@ def test_main_success_with_mock(capsys):
             mock_run.assert_called_once()
 
 
-def test_main_keyboard_interrupt(capsys):
-    from gateway.cli import main
-    
-    def raise_keyboard_interrupt(*args, **kwargs):
-        raise KeyboardInterrupt()
-    
-    mock_registry_instance = MagicMock()
-    mock_registry_instance.stop = lambda: None
-    
-    with patch("gateway.server.run_gateway_server", side_effect=raise_keyboard_interrupt):
-        with patch("gateway.registry.MachineRegistry", return_value=mock_registry_instance):
-            with pytest.raises(SystemExit) as exc_info:
-                main(["--jwt-secret", "test-secret"])
-            assert exc_info.value.code == 0
-
-
 class TestSyslogArgs:
     def test_syslog_default_false(self):
         from gateway.cli import parse_args

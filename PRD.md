@@ -106,13 +106,13 @@ LinuxCNC Fleet provides a gRPC-based architecture that wraps each LinuxCNC insta
 #### FR-7: HAL Component Discovery
 
 - **Input:** `ListHalRequest` with machine_id.
-- **Behavior:** Uses `_hal` Python module to enumerate all HAL components, their pins, and parameters. Returns component metadata (name, update period, pins list, params map).
+- **Behavior:** Uses `hal` Python module to enumerate all HAL components, their pins, and parameters. Returns component metadata (name, update period, pins list, params map).
 - **Output:** `HalComponentList` containing `HalComponentInfo` entries.
 
 #### FR-8: HAL Pin Read/Write
 
 - **Input:** `HalPinRead` (pin_name) or `HalPinWrite` (pin_name + typed value: bit/u32/s32/float).
-- **Behavior:** Reads/writes via `_hal` module. Writes validate that the target pin is an output type before proceeding.
+- **Behavior:** Reads/writes via `hal` module. Writes validate that the target pin is an output type before proceeding.
 - **Output:** `HalPinValue` for reads; `Result` for writes.
 
 #### FR-9: HAL Pin Subscription
@@ -301,7 +301,7 @@ They are independent: a machine in MANUAL mode can be RUNNING (operator jogging)
 | Dependency                          | On Whom               | Purpose                                                         |
 | ----------------------------------- | --------------------- | --------------------------------------------------------------- |
 | `linuxcnc` Python module            | Sidecar machines only | C++ extension providing stat/command/error_channel/ini bindings |
-| `_hal` C extension                  | Sidecar machines only | HAL pin read/write/list operations                              |
+| `hal` Python module                 | Sidecar machines only | HAL pin read/write/list operations                              |
 | OIDC Provider (Keycloak/Auth0/etc.) | Gateway               | Token issuance; JWKS endpoint for RS256 validation              |
 
 ---
@@ -379,7 +379,7 @@ viewer ──► operator ──► programmer ──► maintainer ──► ad
 | 3   | Load testing                          | Not started                 | No benchmarking for concurrent connections or broadcast performance                                    |
 | 4   | Certificate auto-renewal              | Not started                 | No mechanism for cert rotation                                                                         |
 | 5   | Prometheus metrics / health endpoints | Not started                 | No `/metrics` or `/health` HTTP endpoints                                                              |
-| 6   | Real LinuxCNC integration testing     | Deferred                    | Requires target machine with actual LinuxCNC installed; all tests use mocked `linuxcnc`/`_hal` modules |
+| 6   | Real LinuxCNC integration testing     | Deferred                    | Requires target machine with actual LinuxCNC installed; all tests use mocked `linuxcnc`/`hal` modules |
 | 7   | FleetClient TLS for machine channels  | Bug-fixed but not re-tested | Previously created insecure channels when `tls_enabled=True`; fixed in code                            |
 
 ### 6.2 Codebase Observations (TODOs / Known Issues)
@@ -400,7 +400,7 @@ viewer ──► operator ──► programmer ──► maintainer ──► ad
 
 4. **Single Gateway Deployment:** The registry is in-memory with no replication. A single gateway instance is the documented deployment model; horizontal scaling of the gateway layer is not addressed.
 
-5. **LinuxCNC Version Compatibility:** The `linuxcnc` Python module is a C++ extension whose API may change between LinuxCNC releases. The sidecar directly accesses `linuxcnc.stat.*` fields, `linuxcnc.command.*` methods, and `_hal` module functions without version abstraction.
+5. **LinuxCNC Version Compatibility:** The `linuxcnc` Python module is a C++ extension whose API may change between LinuxCNC releases. The sidecar directly accesses `linuxcnc.stat.*` fields, `linuxcnc.command.*` methods, and `hal` module functions without version abstraction.
 
 6. **No Program Storage:** The system loads programs by file path on the remote machine — there is no program repository or transfer mechanism. Programs must already exist on the target machine's filesystem.
 
@@ -471,7 +471,7 @@ linuxcnc-fleet/
 │   ├── __init__.py
 │   └── server.py                # aiohttp web dashboard with SSE streaming (1903 lines, includes HTML)
 ├── tests/
-│   ├── conftest.py              # Shared mock fixtures (linuxcnc, _hal, gRPC servers)
+│   ├── conftest.py              # Shared mock fixtures (linuxcnc, hal, gRPC servers)
 │   ├── test_state_mapping.py    # State enum mapping correctness (26 tests)
 │   ├── test_snapshot.py         # Snapshot immutability & atomic swap (7 tests)
 │   ├── test_sidecar.py          # Control command error paths (63 tests)

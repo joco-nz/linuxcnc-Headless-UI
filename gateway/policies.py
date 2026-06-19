@@ -303,9 +303,6 @@ class PolicyEngine:
             # Facility-scoped roles can only see machines in their facility
             if user_facility and machine_facility == user_facility:
                 filtered.append(machine)
-            # If no facility assigned, admin-only access (empty set)
-            elif not user_facility and role == Role.admin:
-                filtered.append(machine)
 
         return filtered
 

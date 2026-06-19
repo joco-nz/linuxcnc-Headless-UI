@@ -82,6 +82,9 @@ class TestMapInterpState:
     def test_waiting(self, linuxcnc_module):
         assert _map_interp_state(linuxcnc_module.INTERP_WAITING) == InterpState.PREDICT
 
+    def test_error(self, linuxcnc_module):
+        assert _map_interp_state(linuxcnc_module.INTERP_ERROR) == InterpState.ERROR
+
     def test_unknown_maps_to_idle(self):
         assert _map_interp_state(99) == InterpState.INTERP_IDLE
 

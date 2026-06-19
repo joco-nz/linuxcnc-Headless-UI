@@ -61,6 +61,11 @@ class FleetServiceStub(object):
                 request_serializer=fleet__pb2.MachineStateCommand.SerializeToString,
                 response_deserializer=fleet__pb2.Result.FromString,
                 _registered_method=True)
+        self.InitMachine = channel.unary_unary(
+                '/linuxcnc_fleet.FleetService/InitMachine',
+                request_serializer=fleet__pb2.InitMachineRequest.SerializeToString,
+                response_deserializer=fleet__pb2.Result.FromString,
+                _registered_method=True)
         self.Start = channel.unary_unary(
                 '/linuxcnc_fleet.FleetService/Start',
                 request_serializer=fleet__pb2.Empty.SerializeToString,
@@ -188,6 +193,12 @@ class FleetServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def SetMachineState(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def InitMachine(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -333,6 +344,11 @@ def add_FleetServiceServicer_to_server(servicer, server):
             'SetMachineState': grpc.unary_unary_rpc_method_handler(
                     servicer.SetMachineState,
                     request_deserializer=fleet__pb2.MachineStateCommand.FromString,
+                    response_serializer=fleet__pb2.Result.SerializeToString,
+            ),
+            'InitMachine': grpc.unary_unary_rpc_method_handler(
+                    servicer.InitMachine,
+                    request_deserializer=fleet__pb2.InitMachineRequest.FromString,
                     response_serializer=fleet__pb2.Result.SerializeToString,
             ),
             'Start': grpc.unary_unary_rpc_method_handler(
@@ -567,6 +583,33 @@ class FleetService(object):
             target,
             '/linuxcnc_fleet.FleetService/SetMachineState',
             fleet__pb2.MachineStateCommand.SerializeToString,
+            fleet__pb2.Result.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InitMachine(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/linuxcnc_fleet.FleetService/InitMachine',
+            fleet__pb2.InitMachineRequest.SerializeToString,
             fleet__pb2.Result.FromString,
             options,
             channel_credentials,

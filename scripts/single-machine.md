@@ -52,7 +52,7 @@ This runs 5 checks:
 | 2 | Route machine | Gateway routing to sidecar address |
 | 3 | Get status | Sidecar → MachineStatus protobuf |
 | 4 | Get machine info | INI file parsing + version info |
-| 5 | List HAL components | `_hal` module enumeration (skipped on non-RT) |
+| 5 | List HAL components | `hal` module enumeration (skipped on non-RT) |
 
 ### Custom verification parameters
 
@@ -161,4 +161,4 @@ kill $(lsof -ti :50051) $(lsof -ti :50052) 2>/dev/null || true
 - Check that the gateway and sidecar are using matching JWT secrets/issuer/audience
 
 ### HAL components not listed
-The `_hal` module requires a real-time kernel. On uspace/non-RT setups this check will be skipped with a note — this is expected.
+The `hal` module may not be available on all LinuxCNC configurations (e.g., userspace simulation without RT kernel). On non-RT setups this check will be skipped with a note — this is expected.

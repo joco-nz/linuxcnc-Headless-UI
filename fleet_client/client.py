@@ -11,6 +11,11 @@ from typing import Any, AsyncGenerator, Optional
 
 import grpc
 
+try:
+    import aiohttp
+except ImportError:
+    aiohttp = None  # type: ignore[assignment]
+
 from fleet_client.auth import create_aio_auth_interceptor
 from linuxcnc_fleet.fleet_pb2_grpc import FleetGatewayServiceStub as _SyncFleetGatewayServiceStub
 from linuxcnc_fleet.fleet_pb2_grpc import FleetServiceStub as _SyncFleetServiceStub
@@ -33,6 +38,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     HalPinValue,
     HalPinWrite,
     HomeAxisRequest,
+    InitMachineRequest,
     IniParamRequest,
     IniParamValue,
     ListHalRequest,
@@ -63,6 +69,25 @@ def _error_details(e: BaseException) -> str:
     if hasattr(e, 'details'):
         return e.details()
     return str(e)
+
+
+def _log_rpc_failure(method_name: str, machine_id: Optional[str], e: BaseException) -> None:
+    """Log an RPC failure at the appropriate level based on error type.
+
+    Retryable gRPC errors (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED)
+    are logged at WARNING to avoid log noise from transient failures.
+    Non-retryable errors and non-gRPC exceptions are logged at ERROR.
+    """
+    if hasattr(e, 'code'):
+        code = e.code()
+        if code in (grpc.StatusCode.UNAVAILABLE,
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    grpc.StatusCode.RESOURCE_EXHAUSTED):
+            log.warning("%s failed for %s: %s", method_name, machine_id, _error_details(e))
+        else:
+            log.error("%s failed for %s: %s", method_name, machine_id, _error_details(e))
+    else:
+        log.error("%s failed for %s: %s", method_name, machine_id, _error_details(e))
 
 
 def _serialize_request(req: Any) -> bytes:
@@ -348,7 +373,6 @@ class _CachedChannel:
     channel: grpc.Channel
     created_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
-    ref_count: int = 0
 
 
 class FleetClient:
@@ -399,15 +423,20 @@ class FleetClient:
         
         # Machine channel cache
         self._machine_channels: dict[str, _CachedChannel] = {}
-        self._cache_lock = threading.Lock()
+        self._cache_lock = asyncio.Lock()
         
-        # Background cleanup task
-        self._cleanup_task: Optional[asyncio.Task] = None
+ 
 
-    def _create_gateway_channel(self) -> grpc.Channel:
-        """Create the gRPC channel to the gateway server."""
+    def _create_gateway_channel(self, use_tls: bool | None = None) -> grpc.Channel:
+        """Create the gRPC channel to the gateway server.
+        
+        Args:
+            use_tls: If None, uses self._tls_enabled. If True/False, overrides.
+        """
+        if use_tls is None:
+            use_tls = self._tls_enabled
         self._gateway_interceptor = create_aio_auth_interceptor(self._token)
-        if self._tls_enabled:
+        if use_tls:
             creds = grpc.ssl_channel_credentials()
             return grpc.aio.secure_channel(
                 self._gateway_address,
@@ -419,6 +448,77 @@ class FleetClient:
                 self._gateway_address,
                 interceptors=[self._gateway_interceptor],
             )
+
+    async def _detect_tls(self) -> bool | None:
+        """Auto-detect whether the gateway uses TLS by probing HTTP endpoint.
+        
+        Tries /api/config first, then falls back to /health.
+        Returns True/False if detected, None if no HTTP endpoint reachable.
+        """
+        if aiohttp is None:
+            return None
+        
+        host = self._gateway_address.split(":")[0]
+        for port in (50053, 8080, 80):
+            for path in ("/api/config", "/health"):
+                try:
+                    url = f"http://{host}:{port}{path}"
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            url, timeout=aiohttp.ClientTimeout(total=2)
+                        ) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                if "tls_enabled" in data:
+                                    return bool(data["tls_enabled"])
+                except Exception:
+                    continue
+        
+        return None
+
+    async def _create_channel_with_fallback(self) -> grpc.Channel:
+        """Create gateway channel with TLS auto-detection and fallback.
+        
+        Probes HTTP endpoint for TLS status, then attempts connection.
+        Falls back to insecure if TLS connection fails.
+        """
+        use_tls = self._tls_enabled
+        
+        # Proactively probe HTTP endpoint for TLS status when tls is requested
+        if use_tls:
+            detected = await self._detect_tls()
+            if detected is not None and detected != use_tls:
+                log.info(
+                    "TLS auto-detected as %s (requested %s) for %s",
+                    detected, use_tls, self._gateway_address,
+                )
+                use_tls = detected
+        
+        if use_tls:
+            # Attempt secure connection with fallback to insecure
+            channel = self._create_gateway_channel(use_tls=True)
+            await asyncio.sleep(0.2)
+            
+            try:
+                raw_channel = getattr(channel, '_channel', None)
+                if raw_channel is not None:
+                    state = await asyncio.wait_for(
+                        raw_channel.check_connectivity_state(True),
+                        timeout=3.0,
+                    )
+                    if state == grpc.ChannelConnectivity.TRANSIENT_FAILURE:
+                        log.warning(
+                            "TLS connection to %s failed — falling back to insecure",
+                            self._gateway_address,
+                        )
+                        await channel.close()
+                        return self._create_gateway_channel(use_tls=False)
+            except Exception:
+                pass
+
+            return channel
+
+        return self._create_gateway_channel(use_tls=use_tls)
 
     async def _get_or_create_machine_channel(
         self, address: str, port: int
@@ -434,7 +534,7 @@ class FleetClient:
         """
         key = f"{address}:{port}"
         
-        with self._cache_lock:
+        async with self._cache_lock:
             if key in self._machine_channels:
                 cached = self._machine_channels[key]
                 # Check TTL expiry
@@ -444,40 +544,56 @@ class FleetClient:
                     del self._machine_channels[key]
                 else:
                     cached.last_used = time.time()
-                    cached.ref_count += 1
                     return cached.channel
             
-            # Create new channel
-            if self._tls_enabled:
-                creds = grpc.ssl_channel_credentials()
-                channel = grpc.aio.secure_channel(
-                    f"{address}:{port}",
-                    creds,
-                    interceptors=[create_aio_auth_interceptor(self._token)],
+            # Create new channel with TLS fallback
+            use_tls = self._tls_enabled if self._tls_enabled else None
+            try:
+                channel = self._create_machine_channel(address, port, use_tls=True)
+                await asyncio.sleep(0.1)
+                state = await asyncio.wait_for(
+                    channel._channel.check_connectivity_state(True),
+                    timeout=3.0,
                 )
-            else:
-                channel = grpc.aio.insecure_channel(
-                    f"{address}:{port}",
-                    interceptors=[create_aio_auth_interceptor(self._token)],
-                )
+                if state == grpc.ChannelConnectivity.TRANSIENT_FAILURE:
+                    log.warning(
+                        "TLS connection to machine %s:%d failed — falling back to insecure",
+                        address, port,
+                    )
+                    await channel.close()
+                    channel = self._create_machine_channel(address, port, use_tls=False)
+            except Exception:
+                try:
+                    await channel.close()
+                except Exception:
+                    pass
+                channel = self._create_machine_channel(address, port, use_tls=False)
             
             self._machine_channels[key] = _CachedChannel(channel=channel)
             return channel
 
-    def _cleanup_expired_channels(self) -> None:
-        """Remove expired machine channels from cache."""
-        now = time.time()
-        expired_keys = []
+    def _create_machine_channel(
+        self, address: str, port: int, use_tls: bool
+    ) -> grpc.Channel:
+        """Create a gRPC channel to a machine instance.
         
-        with self._cache_lock:
-            for key, cached in self._machine_channels.items():
-                if now - cached.created_at > self._machine_channel_ttl:
-                    expired_keys.append(key)
-            
-            for key in expired_keys:
-                cached = self._machine_channels.pop(key)
-                cached.channel.close()
-                log.debug("Cleaned up expired channel %s", key)
+        Args:
+            address: Machine IP address or hostname
+            port: Machine gRPC port
+            use_tls: Whether to use TLS for this channel
+        """
+        if use_tls:
+            creds = grpc.ssl_channel_credentials()
+            return grpc.aio.secure_channel(
+                f"{address}:{port}",
+                creds,
+                interceptors=[create_aio_auth_interceptor(self._token)],
+            )
+        else:
+            return grpc.aio.insecure_channel(
+                f"{address}:{port}",
+                interceptors=[create_aio_auth_interceptor(self._token)],
+            )
 
     async def close(self) -> None:
         """Close all channels and clean up resources."""
@@ -494,13 +610,17 @@ class FleetClient:
                 pass
         
         # Close all machine channels
-        with self._cache_lock:
+        closed_channels = []
+        async with self._cache_lock:
             for cached in self._machine_channels.values():
-                try:
-                    cached.channel.close()
-                except Exception:
-                    pass
+                closed_channels.append(cached.channel)
             self._machine_channels.clear()
+        
+        for ch in closed_channels:
+            try:
+                await ch.close()
+            except Exception:
+                pass
 
     async def __aenter__(self) -> "FleetClient":
         """Async context manager entry."""
@@ -508,9 +628,12 @@ class FleetClient:
         return self
 
     async def _ensure_gateway_channel(self) -> None:
-        """Lazily create gateway channel and stub if not already created."""
+        """Lazily create gateway channel and stub if not already created.
+        
+        Uses TLS auto-detection with fallback to handle misconfigured TLS.
+        """
         if self._gateway_channel is None:
-            self._gateway_channel = self._create_gateway_channel()
+            self._gateway_channel = await self._create_channel_with_fallback()
             if self._gateway_stub is None:
                 self._gateway_stub = _AioFleetGatewayServiceStub(self._gateway_channel)
 
@@ -539,7 +662,7 @@ class FleetClient:
             self._gateway_stub = None
         
         # Close all cached machine channels (they'll be recreated on next use)
-        with self._cache_lock:
+        async with self._cache_lock:
             for key, cached in self._machine_channels.items():
                 try:
                     await cached.channel.close()
@@ -587,14 +710,14 @@ class FleetClient:
                     machine_id=m.machine_id,
                     machine_name=m.machine_name,
                     host_address=m.host_address,
-                    version=m.version or None,
+                    version=m.version.version_string if m.version else None,
                     num_joints=m.num_joints,
                     num_hal_components=m.num_hal_components,
                 )
                 for m in response.machines
             ]
         except Exception as e:
-            log.error("DiscoverMachines failed: %s", _error_details(e))
+            _log_rpc_failure("DiscoverMachines", None, e)
             raise
 
     async def route_machine(self, machine_id: str) -> tuple[str, int]:
@@ -607,10 +730,14 @@ class FleetClient:
             Tuple of (host_address, port)
             
         Raises:
+            ValueError: If machine_id is empty or whitespace-only
             grpc.aio.AioRpcError: If machine not found or access denied
      """
         if self._closed:
             raise RuntimeError("Client is closed")
+        
+        if not machine_id or not machine_id.strip():
+            raise ValueError("machine_id must not be empty")
         
         await self._ensure_gateway_channel()
         
@@ -619,7 +746,7 @@ class FleetClient:
             response: GatewayRoute = await self._gateway_stub.RouteMachine(request)
             return (response.instance_address, response.instance_port)
         except Exception as e:
-            log.error("RouteMachine failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("RouteMachine", machine_id, e)
             raise
 
     async def register_machine(
@@ -664,7 +791,7 @@ class FleetClient:
             response = await self._gateway_stub.RegisterMachine(request)
             return response.success
         except Exception as e:
-            log.error("RegisterMachine failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("RegisterMachine", machine_id, e)
             raise
 
     async def broadcast_command(
@@ -726,7 +853,7 @@ class FleetClient:
             
             return results
         except Exception as e:
-            log.error("BroadcastCommand failed: %s", _error_details(e))
+            _log_rpc_failure("BroadcastCommand", None, e)
             raise
 
     async def broadcast_mdi(
@@ -859,7 +986,7 @@ class FleetClient:
                 lambda: self._do_list_programs(machine_id, directory, max_depth),
             )
         except Exception as e:
-            log.error("ListPrograms failed for %s: %s", machine_id, e)
+            _log_rpc_failure("ListPrograms", machine_id, e)
             raise
 
     async def _do_list_programs(self, machine_id: str, directory: str = "", max_depth: int = 0):
@@ -900,7 +1027,7 @@ class FleetClient:
             async for status in call:
                 yield (status.machine_id, status)
         except Exception as e:
-            log.error("SubscribeAllStatus failed: %s", _error_details(e))
+            _log_rpc_failure("SubscribeAllStatus", None, e)
             raise
 
     # -----------------------------------------------------------------------
@@ -912,8 +1039,12 @@ class FleetClient:
     ) -> tuple[_AioFleetServiceStub, str, int]:
         """Route a machine and return (_AioFleetServiceStub, address, port).
         
+        Raises ValueError if machine_id is empty or whitespace-only.
         Raises grpc.aio.AioRpcError if machine not found or access denied.
         """
+        if not machine_id or not machine_id.strip():
+            raise ValueError("machine_id must not be empty")
+        
         addr, port = await self.route_machine(machine_id)
         channel = await self._get_or_create_machine_channel(addr, port)
         stub = self._fleet_stub_factory(channel)
@@ -966,7 +1097,7 @@ class FleetClient:
             result = await self._retry_read("GetStatus", lambda: self._do_get_status(machine_id))
             return result
         except Exception as e:
-            log.error("GetStatus failed for %s: %s", machine_id, e)
+            _log_rpc_failure("GetStatus", machine_id, e)
             raise
 
     async def _do_get_status(self, machine_id: str):
@@ -991,7 +1122,7 @@ class FleetClient:
             request = SetModeRequest(id=MachineId(id=machine_id), mode=mode)
             return await stub[0].SetMode(request)
         except Exception as e:
-            log.error("SetMode failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("SetMode", machine_id, e)
             raise
 
     async def set_execution(self, machine_id: str, state: int) -> Result:
@@ -1012,7 +1143,7 @@ class FleetClient:
             request = ExecutionCommand(id=MachineId(id=machine_id), state=state)
             return await stub[0].SetExecution(request)
         except Exception as e:
-            log.error("SetExecution failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("SetExecution", machine_id, e)
             raise
 
     async def start(self, machine_id: str) -> Result:
@@ -1031,7 +1162,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].Start(Empty())
         except Exception as e:
-            log.error("Start failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("Start", machine_id, e)
             raise
 
     async def stop(self, machine_id: str) -> Result:
@@ -1050,7 +1181,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].Stop(Empty())
         except Exception as e:
-            log.error("Stop failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("Stop", machine_id, e)
             raise
 
     async def feed_hold(self, machine_id: str) -> Result:
@@ -1069,7 +1200,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].FeedHold(Empty())
         except Exception as e:
-            log.error("FeedHold failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("FeedHold", machine_id, e)
             raise
 
     async def continue_exec(self, machine_id: str) -> Result:
@@ -1088,7 +1219,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].Continue(Empty())
         except Exception as e:
-            log.error("Continue failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("Continue", machine_id, e)
             raise
 
     async def home_all(self, machine_id: str) -> Result:
@@ -1107,7 +1238,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].HomeAll(Empty())
         except Exception as e:
-            log.error("HomeAll failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("HomeAll", machine_id, e)
             raise
 
     async def step_forward(self, machine_id: str) -> Result:
@@ -1126,7 +1257,7 @@ class FleetClient:
             stub = await self._get_fleet_stub(machine_id)
             return await stub[0].StepForward(Empty())
         except Exception as e:
-            log.error("StepForward failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("StepForward", machine_id, e)
             raise
 
     async def send_mdi(self, machine_id: str, command: str) -> Result:
@@ -1147,7 +1278,7 @@ class FleetClient:
             request = MdiCommand(id=MachineId(id=machine_id), command=command)
             return await stub[0].SendMdiCommand(request)
         except Exception as e:
-            log.error("SendMDI failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("SendMDI", machine_id, e)
             raise
 
     async def home_axis(self, machine_id: str, axis: int) -> Result:
@@ -1170,7 +1301,7 @@ class FleetClient:
             )
             return await stub[0].HomeAxis(request)
         except Exception as e:
-            log.error("HomeAxis(%d) failed for %s: %s", axis, machine_id, _error_details(e))
+            _log_rpc_failure("HomeAxis", machine_id, e)
             raise
 
     async def load_program(self, machine_id: str, path: str) -> Result:
@@ -1191,7 +1322,7 @@ class FleetClient:
             request = ProgramPath(id=MachineId(id=machine_id), path=path)
             return await stub[0].LoadProgram(request)
         except Exception as e:
-            log.error("LoadProgram(%s) failed for %s: %s", path, machine_id, _error_details(e))
+            _log_rpc_failure("LoadProgram", machine_id, e)
             raise
 
     async def get_position(
@@ -1217,7 +1348,7 @@ class FleetClient:
                 lambda: self._do_get_position(machine_id, position_type),
             )
         except Exception as e:
-            log.error("GetPosition failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("GetPosition", machine_id, e)
             raise
 
     async def _do_get_position(self, machine_id: str, position_type: int):
@@ -1243,7 +1374,7 @@ class FleetClient:
                 lambda: self._do_list_hal(machine_id),
             )
         except Exception as e:
-            log.error("ListHalComponents failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("ListHalComponents", machine_id, e)
             raise
 
     async def _do_list_hal(self, machine_id: str):
@@ -1270,7 +1401,7 @@ class FleetClient:
                 lambda: self._do_read_hal_pin(machine_id, pin_name),
             )
         except Exception as e:
-            log.error("ReadHalPin '%s' failed for %s: %s", pin_name, machine_id, _error_details(e))
+            _log_rpc_failure("ReadHalPin", machine_id, e)
             raise
 
     async def _do_read_hal_pin(self, machine_id: str, pin_name: str):
@@ -1315,7 +1446,7 @@ class FleetClient:
              )
             return await stub[0].WriteHalPin(request)
         except Exception as e:
-            log.error("WriteHalPin '%s' failed for %s: %s", pin_name, machine_id, _error_details(e))
+            _log_rpc_failure("WriteHalPin", machine_id, e)
             raise
 
     async def get_errors(
@@ -1341,7 +1472,7 @@ class FleetClient:
                 lambda: self._do_get_errors(machine_id, limit),
             )
         except Exception as e:
-            log.error("GetErrors failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("GetErrors", machine_id, e)
             raise
 
     async def _do_get_errors(self, machine_id: str, limit: int):
@@ -1367,7 +1498,7 @@ class FleetClient:
                 lambda: self._do_get_machine_info(machine_id),
             )
         except Exception as e:
-            log.error("GetMachineInfo failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("GetMachineInfo", machine_id, e)
             raise
 
     async def _do_get_machine_info(self, machine_id: str):
@@ -1400,8 +1531,7 @@ class FleetClient:
                 lambda: self._do_get_ini_param(machine_id, section, option),
             )
         except Exception as e:
-            log.error("GetIniParam [%s]%s failed for %s: %s",
-                      section, option, machine_id, _error_details(e))
+            _log_rpc_failure("GetIniParam", machine_id, e)
             raise
 
     async def _do_get_ini_param(self, machine_id: str, section: str, option: str):
@@ -1433,7 +1563,43 @@ class FleetClient:
             )
             return await stub[0].SetMachineState(request)
         except Exception as e:
-            log.error("SetMachineState failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("SetMachineState", machine_id, e)
+            raise
+
+    async def init_machine(
+        self,
+        machine_id: str,
+        reset_estop: bool = True,
+        power_on: bool = True,
+        set_mode: bool = True,
+    ) -> Result:
+        """Initialize machine: estop_reset -> power_on -> mode(MANUAL).
+
+        Admin-only operation. Requires admin role.
+
+        Args:
+            machine_id: Target machine identifier
+            reset_estop: Clear E-stop state (default True)
+            power_on: Enable machine power (default True)
+            set_mode: Switch to MANUAL mode (default True)
+
+        Returns:
+            Result with success status and message listing completed steps.
+        """
+        if self._closed:
+            raise RuntimeError("Client is closed")
+
+        try:
+            stub = await self._get_fleet_stub(machine_id)
+            request = InitMachineRequest(
+                id=MachineId(id=machine_id),
+                reset_estop=reset_estop,
+                power_on=power_on,
+                set_mode=set_mode,
+            )
+            return await stub[0].InitMachine(request)
+        except Exception as e:
+            _log_rpc_failure("InitMachine", machine_id, e)
             raise
 
     # -----------------------------------------------------------------------
@@ -1462,7 +1628,7 @@ class FleetClient:
             async for status in call:
                 yield status
         except Exception as e:
-            log.error("SubscribeStatus failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("SubscribeStatus", machine_id, e)
             raise
 
     async def subscribe_hal_pins(
@@ -1495,7 +1661,7 @@ class FleetClient:
             async for update in call:
                 yield update
         except Exception as e:
-            log.error("SubscribeHalPins failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("SubscribeHalPins", machine_id, e)
             raise
 
     async def subscribe_errors(
@@ -1520,5 +1686,5 @@ class FleetClient:
             async for error in call:
                 yield error
         except Exception as e:
-            log.error("SubscribeErrors failed for %s: %s", machine_id, _error_details(e))
+            _log_rpc_failure("SubscribeErrors", machine_id, e)
             raise

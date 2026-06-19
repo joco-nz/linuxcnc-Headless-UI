@@ -152,7 +152,7 @@ All issues documented in `headless_ui.md` have been resolved:
 Read `headless_ui.md` before making any changes. It defines:
 
 - The full gRPC protocol (`fleet.proto` — see the Protocol Definition section)
-- The Python stack: grpcio, protobuf, linuxcnc/_hal modules (already on target machines)
+- The Python stack: grpcio, protobuf, linuxcnc/hal modules (already on target machines)
 - Four components: **sidecar** (`linuxcnc_fleet/`), **gateway** (`gateway/`), **client** (`fleet_client/`), **dashboard** (`fleet_ui/`)
 - 6 implementation phases (Weeks 1–12). Respect this order unless told otherwise.
 - The file layout target (line 728) — use it as the directory structure template.
@@ -166,14 +166,14 @@ Read `headless_ui.md` before making any changes. It defines:
 | FleetServiceRPC      | `linuxcnc_fleet/server.py` (486 lines, updated)           | 64 (test_fleet_service_rpc.py — NEW)                                                   | ✅      |
 | gRPC server   | `linuxcnc_fleet/server.py` (484 lines)                                  | —                                                                        | ✅      |
 | CLI           | `linuxcnc_fleet/cli.py` (167 lines)                                     | 26 (test_cli.py)                                                         | ✅      |
-| Test infra    | `tests/conftest.py` (mock linuxcnc/_hal via pytest_configure)           |                                                                          | ✅      |
+| Test infra    | `tests/conftest.py` (mock linuxcnc/hal via pytest_configure)           |                                                                          | ✅      |
 
 ### Key implementation notes
 
 - `LinuxCncSidecar.shutdown()` stops the polling loop (not `stop()` — that's the execution stop RPC handler)
 - State mapping functions use protobuf enum values directly (no `.value` — they are ints)
 - Proto uses `MODE_MDA`, not `MODE_MDI` (linuxcnc constant is `MODE_MDI`)
-- Mock linuxcnc/_hal modules injected via `pytest_configure` in conftest.py (before test collection)
+- Mock linuxcnc/hal modules injected via `pytest_configure` in conftest.py (before test collection)
 
 ## Phase 2 Deliverables
 
@@ -198,7 +198,7 @@ Read `headless_ui.md` before making any changes. It defines:
 
 ## When Implementing Phase 2+
 
-- The sidecar wraps existing LinuxCNC Python modules (`linuxcnc.stat`, `linuxcnc.command`, `_hal`). These are **not** installed here — they exist only on target machines.
+- The sidecar wraps existing LinuxCNC Python modules (`linuxcnc.stat`, `linuxcnc.command`, `hal`). These are **not** installed here — they exist only on target machines.
 - State mapping from `linuxcnc.stat.*` values to protobuf enums is defined in the plan (lines 432–455). Trust that mapping.
 - The polling loop runs at 50Hz with atomic snapshot swaps (no locks needed).
 
@@ -249,4 +249,4 @@ Key points:
 - Entry points: `headless-server`, `fleet-gateway`, `fleet-ui`
 - Run tests: `python -m pytest tests/ -v`
 - Build distributions: `python -m build` (produces sdist + wheel in `dist/`)
-- Target machines need: LinuxCNC installed, Python 3.10+, the `linuxcnc` and `_hal` C extensions (bundled with LinuxCNC).
+- Target machines need: LinuxCNC installed, Python 3.10+, the `linuxcnc` and `hal` Python modules (bundled with LinuxCNC).

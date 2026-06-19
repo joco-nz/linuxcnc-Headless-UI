@@ -83,6 +83,18 @@ fleet_ui = ["*.py"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-p no:xvfb"
+filterwarnings = [
+    # IT7: aiohttp NotAppKeyWarning — tests use string keys instead of web.AppKey instances.
+    # Both production code (gateway/server.py) and test code use string keys for simplicity;
+    # this is a convention warning only, no functional impact.
+    "ignore::aiohttp.web_exceptions.NotAppKeyWarning",
+    # IT8: gRPC aio interceptor coroutine cleanup race — known grpcio library behavior.
+    # When async channels close, InterceptedUnaryUnaryCall objects may be GC'd with
+    # incomplete _interceptors_task initialization. No user-space fix exists; suppression
+    # documents that this has been investigated and accepted as a library limitation.
+    "ignore:coroutine.*InterceptedUnaryUnaryCall.*:RuntimeWarning",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.mypy]
 python_version = "3.10"

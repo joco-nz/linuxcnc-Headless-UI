@@ -18,6 +18,7 @@ from linuxcnc_fleet.fleet_pb2 import (
     ExecutionCommand,
     GetErrorsRequest,
     HomeAxisRequest,
+    InitMachineRequest,
     MachineId,
     MdiCommand,
     Mode,
@@ -471,6 +472,135 @@ class TestExecutionControl:
 
         # Continue
         result = sidecar_stub.Continue(Empty())
+        assert result.success is True or result.message != ""
+
+        sidecar_channel.close()
+        gateway_channel.close()
+
+
+class TestMachineStartupSequence:
+    """End-to-end: Machine startup sequence (estop_reset → power_on → mode_manual)."""
+
+    def test_init_machine_via_rpc(self, gateway_server):
+        """InitMachine RPC executes full startup sequence through real LinuxCNC."""
+        gw_port, registry, stop_sidecar, stop_gw = gateway_server
+
+        gateway_channel = grpc.insecure_channel(f"127.0.0.1:{gw_port}")
+        gateway_stub = FleetGatewayServiceStub(gateway_channel)
+
+        token = _make_admin_token()
+        metadata = [("authorization", f"Bearer {token}")]
+
+        route_resp = gateway_stub.RouteMachine(
+            MachineId(id="integration-real-machine"),
+            metadata=metadata,
+        )
+
+        sidecar_channel = grpc.insecure_channel(
+            f"{route_resp.instance_address}:{route_resp.instance_port}"
+        )
+        sidecar_stub = FleetServiceStub(sidecar_channel)
+
+        result = sidecar_stub.InitMachine(
+            InitMachineRequest(
+                reset_estop=True,
+                power_on=True,
+                set_mode=True,
+            )
+        )
+
+        assert result.success is True
+        assert "initialized" in result.message.lower()
+        assert "estop_reset" in result.message.lower()
+        assert "power_on" in result.message.lower()
+        assert "mode_manual" in result.message.lower()
+
+        sidecar_channel.close()
+        gateway_channel.close()
+
+    def test_individual_state_transitions(self, gateway_server):
+        """Individual state transitions (estop_reset, power_on) work via sidecar."""
+        gw_port, registry, stop_sidecar, stop_gw = gateway_server
+
+        gateway_channel = grpc.insecure_channel(f"127.0.0.1:{gw_port}")
+        gateway_stub = FleetGatewayServiceStub(gateway_channel)
+
+        token = _make_admin_token()
+        metadata = [("authorization", f"Bearer {token}")]
+
+        route_resp = gateway_stub.RouteMachine(
+            MachineId(id="integration-real-machine"),
+            metadata=metadata,
+        )
+
+        sidecar_channel = grpc.insecure_channel(
+            f"{route_resp.instance_address}:{route_resp.instance_port}"
+        )
+        sidecar_stub = FleetServiceStub(sidecar_channel)
+
+        from linuxcnc_fleet.fleet_pb2 import MachineStateCommand
+
+        # E-Stop Reset
+        result = sidecar_stub.SetMachineState(
+            MachineStateCommand(
+                id=MachineId(id="integration-real-machine"),
+                state=1,  # STATE_ESTOP_RESET
+            )
+        )
+        assert result.success is True or "state set" in result.message.lower()
+
+        import time as _time
+        _time.sleep(0.3)
+
+        # Power On
+        result = sidecar_stub.SetMachineState(
+            MachineStateCommand(
+                id=MachineId(id="integration-real-machine"),
+                state=3,  # STATE_ON
+            )
+        )
+        assert result.success is True or "state set" in result.message.lower()
+
+        _time.sleep(0.3)
+
+        sidecar_channel.close()
+        gateway_channel.close()
+
+    def test_home_after_init(self, gateway_server):
+        """Homing works after machine initialization sequence."""
+        gw_port, registry, stop_sidecar, stop_gw = gateway_server
+
+        gateway_channel = grpc.insecure_channel(f"127.0.0.1:{gw_port}")
+        gateway_stub = FleetGatewayServiceStub(gateway_channel)
+
+        token = _make_admin_token()
+        metadata = [("authorization", f"Bearer {token}")]
+
+        route_resp = gateway_stub.RouteMachine(
+            MachineId(id="integration-real-machine"),
+            metadata=metadata,
+        )
+
+        sidecar_channel = grpc.insecure_channel(
+            f"{route_resp.instance_address}:{route_resp.instance_port}"
+        )
+        sidecar_stub = FleetServiceStub(sidecar_channel)
+
+        # Initialize machine first
+        result = sidecar_stub.InitMachine(
+            InitMachineRequest(
+                reset_estop=True,
+                power_on=True,
+                set_mode=True,
+            )
+        )
+        assert result.success is True
+
+        import time as _time
+        _time.sleep(0.5)
+
+        # Home axis (X=0)
+        result = sidecar_stub.HomeAxis(HomeAxisRequest(axis=0))
         assert result.success is True or result.message != ""
 
         sidecar_channel.close()

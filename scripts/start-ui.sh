@@ -16,6 +16,7 @@ set -euo pipefail
 
 # ── Configuration (must match setup-single-machine.sh defaults) ───────────────
 GATEWAY_PORT=50052
+HTTP_PORT=50053
 JWT_SECRET="${FLEET_JWT_SECRET:-my-shared-secret}"
 JWT_ISSUER="${FLEET_JWT_ISSUER:-linuxcnc-fleet}"
 JWT_AUDIENCE="${FLEET_JWT_AUDIENCE:-fleet-api}"
@@ -125,6 +126,7 @@ echo ""
 echo "Starting Fleet Dashboard on :$UI_PORT ..."
 fleet-ui \
     --gateway "localhost:$GATEWAY_PORT" \
+    --http-port "$HTTP_PORT" \
     --bind "$BIND_ADDR" \
     --port "$UI_PORT" \
     --allow-origin "$ALLOW_ORIGIN" \

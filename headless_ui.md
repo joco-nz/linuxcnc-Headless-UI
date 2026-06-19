@@ -2,7 +2,7 @@
 
 ## Overview
 
-A centralized Python UI connects to LinuxCNC instances over a secure network using gRPC. Each remote instance runs a lightweight Python "headless sidecar" that wraps existing `linuxcnc` and `_hal` Python modules, exposing them as gRPC RPCs. A central gateway handles SSO authentication, authorization policies, and machine routing.
+A centralized Python UI connects to LinuxCNC instances over a secure network using gRPC. Each remote instance runs a lightweight Python "headless sidecar" that wraps existing `linuxcnc` and `hal` Python modules, exposing them as gRPC RPCs. A central gateway handles SSO authentication, authorization policies, and machine routing.
 
 **No modifications to LinuxCNC C++ core or real-time components.** The sidecar is a pure-Python process running alongside LinuxCNC.
 
@@ -43,7 +43,7 @@ A centralized Python UI connects to LinuxCNC instances over a secure network usi
           │                  │                   │
      ┌────▼────┐      ┌─────▼─────┐      ┌──────▼──────┐
      │linuxcnc │      │ linuxcnc  │      │  linuxcnc   │
-     │ _hal    │      │  _hal     │      │   _hal      │
+      │ hal     │      │  hal      │      │   hal       │
      │ EMC core│      │ EMC core  │      │  EMC core   │
      └─────────┘      └───────────┘      └─────────────┘
 ```
@@ -422,17 +422,17 @@ class LinuxCncSidecar:
         """command.home(axis) with axis validation."""
 
     def read_hal_pin(self, name: str) -> HalPinValue:
-        """Use _hal module to read pin value."""
-        # hal = _hal()
+        """Use hal module to read pin value."""
+        # import hal
         # hal.get_value(name) or similar
 
     def write_hal_pin(self, name: str, value) -> Result:
-        """Use _hal module to write pin value (output pins only)."""
+        """Use hal module to write pin value (output pins only)."""
         # Validate pin is output type before writing
 
     def list_hal_components(self) -> HalComponentList:
         """Enumerate HAL components and their pins."""
-        # Use _hal.list_components() or iterate hal.comp_list
+        # Use hal.get_info_pins(), hal.get_info_signals(), hal.get_info_params()
 
     def get_ini_param(self, section: str, option: str) -> str:
         """ini.get(section, option)"""
@@ -909,7 +909,7 @@ linuxcnc-fleet/
 │   ├── __init__.py
 │   └── server.py                # aiohttp web dashboard — single-page HTML, SSE streams, XSS protections (~1903 lines)
 ├── tests/
-│   ├── conftest.py              # Shared mock fixtures (linuxcnc, _hal, gRPC servers)
+│   ├── conftest.py              # Shared mock fixtures (linuxcnc, hal, gRPC servers)
 │   ├── test_state_mapping.py    # Phase 1: state mapping correctness (26 tests)
 │   ├── test_snapshot.py         # Phase 1: snapshot immutability (7 tests)
 │   ├── test_sidecar.py          # Phase 1: control command error paths (63 tests)
@@ -951,7 +951,7 @@ Key classes in `linuxcnc_fleet/auth.py`:
 - `grpcio`, `grpcio-tools` (gRPC Python)
 - `protobuf` (message definitions)
 - `linuxcnc` (existing LinuxCNC Python module — already available on instance)
-- `_hal` (existing HAL Python extension — already available on instance)
+- `hal` (existing HAL Python module — already available on instance)
 
 ### Gateway (`gateway/`)
 - `grpcio`, `grpcio-tools`
@@ -1060,7 +1060,7 @@ fleet-ui --gateway localhost:50050 --port 8443 \
   - [x] Polling loop at 50Hz with atomic snapshot updates
   - [x] Status extraction from linuxcnc.stat
   - [x] Mode/executive control wrappers
-  - [x] HAL pin read/write via _hal module
+  - [x] HAL pin read/write via hal module
   - [x] INI param access
 - [x] Implement gRPC server in `server.py`
 - [x] CLI entry point with TLS/mTLS validation (`linuxcnc_fleet/cli.py`)
@@ -1208,7 +1208,7 @@ The `linuxcnc` Python module is a C++ extension. Changes to it in future LinuxCN
 50Hz polling means up to 20ms delay for status updates. This is acceptable for dashboard visibility but not for closed-loop control (which this system explicitly does not do).
 
 ### Risk: HAL Pin Enumeration
-The `_hal` module's API for listing components/pins may vary across LinuxCNC versions. Mitigation: wrap in try/except with graceful degradation, and cache pin metadata.
+The `hal` module's API for listing components/pins may vary across LinuxCNC versions. Mitigation: wrap in try/except with graceful degradation, and cache pin metadata.
 
 ---
 

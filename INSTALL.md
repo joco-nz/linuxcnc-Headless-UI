@@ -4,13 +4,13 @@
 
 - **Python 3.10+** (tested with 3.10, 3.11, 3.12)
 - **pip** ≥ 23.0
-- LinuxCNC Python bindings (`linuxcnc`, `_hal`) — sidecar machines only
+- LinuxCNC Python bindings (`linuxcnc`, `hal`) — sidecar machines only
 
 ## Quick Install
 
 | Component | Package | Purpose |
 |-----------|---------|---------|
-| **Sidecar** | `linuxcnc-fleet[sidecar]` | Runs on each CNC machine. Wraps `linuxcnc` and `_hal` Python modules behind a gRPC server. |
+| **Sidecar** | `linuxcnc-fleet[sidecar]` | Runs on each CNC machine. Wraps `linuxcnc` and `hal` Python modules behind a gRPC server. |
 | **Gateway** | `linuxcnc-fleet[gateway]` | Central auth & routing service. OIDC token validation, RBAC policies, machine discovery, broadcast fan-out. |
 | **FleetClient** | `linuxcnc-fleet[client]` | Python client library with automatic OIDC auth injection, retry logic, channel caching, and streaming subscriptions. |
 | **fleet_ui** | `linuxcnc-fleet[ui]` | Web dashboard with real-time status via Server-Sent Events (SSE). |
@@ -112,7 +112,7 @@ Expected output: `379 passed`.
 
 ## Minimal Testing Setup
 
-The test suite uses mock modules for `linuxcnc` and `_hal`, so you can run all tests and verify installations **without** having LinuxCNC installed. This is useful for CI pipelines, development workstations, and containerized environments.
+The test suite uses mock modules for `linuxcnc` and `hal`, so you can run all tests and verify installations **without** having LinuxCNC installed. This is useful for CI pipelines, development workstations, and containerized environments.
 
 ```bash
 # Install dev dependencies
@@ -522,7 +522,7 @@ The generated gRPC stubs need a post-processing step. Run the proto regeneration
 
 The sidecar needs access to LinuxCNC's INI file and Python bindings. Ensure:
 - The `--ini` path points to a valid LinuxCNC `.ini` file
-- The `linuxcnc` and `_hal` modules are importable (LinuxCNC must be installed)
+- The `linuxcnc` and `hal` modules are importable (LinuxCNC must be installed)
 - The user has read access to the INI file and LinuxCNC hal comp pins
 
 ### Gateway rejects connections with `UNAUTHENTICATED`
@@ -535,7 +535,7 @@ Verify the OIDC configuration matches your identity provider:
 
 ### Tests fail with mock errors
 
-The test suite injects mock `linuxcnc` and `_hal` modules via `pytest_configure` in `tests/conftest.py`. Ensure you're running from the project root:
+The test suite injects mock `linuxcnc` and `hal` modules via `pytest_configure` in `tests/conftest.py`. Ensure you're running from the project root:
 
 ```bash
 cd /path/to/linuxcnc-Headless-UI
