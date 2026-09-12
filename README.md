@@ -1,4 +1,4 @@
-# linuxcnc-fleet
+# linuxcnc-fleet (Working Concept - WIP)
 
 gRPC-based headless fleet management for LinuxCNC machines. Monitor and control multiple CNC instances from a single centralized interface — no modifications to the LinuxCNC C++ core or real-time components required.
 
